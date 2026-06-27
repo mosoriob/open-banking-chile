@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { MOVEMENT_SOURCE } from "../types.js";
 import type { BankMovement, CreditCardBalance } from "../types.js";
-import { normalizeBciApiMovements, assembleBciResult, routeBciCardMovements, assignBciCupos } from "./bci.js";
+import { normalizeBciApiMovements, assembleBciResult, routeBciCardMovements, assignBciCupos, planCupoReads } from "./bci.js";
 
 describe("normalizeBciApiMovements", () => {
   it("returns empty array for empty captures", () => {
@@ -284,5 +284,45 @@ describe("assignBciCupos", () => {
     ];
     const out = assignBciCupos(cardsNoDigits, readings);
     expect(out[0].national).toEqual({ total: 500000, used: 100000, available: 400000 });
+  });
+});
+
+describe("planCupoReads", () => {
+  const opts = () => [
+    { value: "v0", label: "bciplus visa gold - 0043" },
+    { value: "v1", label: "bciplus mastercard gold - 3725" },
+    { value: "v2", label: "bciplus visa platinum - 9988" },
+  ];
+
+  it("reads the default-selected card first with no switch", () => {
+    const plan = planCupoReads(opts(), 0);
+    expect(plan[0]).toEqual({ value: "v0", label: "bciplus visa gold - 0043", needsSwitch: false });
+  });
+
+  it("switches to every non-default card after the default", () => {
+    const plan = planCupoReads(opts(), 0);
+    expect(plan.map((s) => s.value)).toEqual(["v0", "v1", "v2"]);
+    expect(plan.map((s) => s.needsSwitch)).toEqual([false, true, true]);
+  });
+
+  it("puts the selected card first even when it is not the first option", () => {
+    const plan = planCupoReads(opts(), 1);
+    expect(plan.map((s) => s.value)).toEqual(["v1", "v0", "v2"]);
+    expect(plan.map((s) => s.needsSwitch)).toEqual([false, true, true]);
+  });
+
+  it("treats an out-of-range selectedIndex as the first option being default", () => {
+    const plan = planCupoReads(opts(), -1);
+    expect(plan.map((s) => s.value)).toEqual(["v0", "v1", "v2"]);
+    expect(plan[0].needsSwitch).toBe(false);
+  });
+
+  it("returns an empty plan when there are no options (no dropdown)", () => {
+    expect(planCupoReads([], 0)).toEqual([]);
+  });
+
+  it("returns a single no-switch read for a single-card account", () => {
+    const single = [{ value: "v0", label: "Tarjeta de Crédito" }];
+    expect(planCupoReads(single, 0)).toEqual([{ value: "v0", label: "Tarjeta de Crédito", needsSwitch: false }]);
   });
 });

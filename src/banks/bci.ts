@@ -395,6 +395,65 @@ async function waitForTableChange(
   return false;
 }
 
+// ─── Cupo dropdown switching (browser-driven, no testable branching) ──
+
+const CUPO_NATIONAL_PANEL = "tarjetasGeneral:saldosNac";
+const CUPO_INTERNATIONAL_PANEL = "tarjetasGeneral:infoSaldosInternacional";
+
+/** innerText of the national cupo panel, used as the change-poll snapshot signal. */
+async function readCupoNationalText(frame: Frame): Promise<string> {
+  return frame.evaluate((id: string) => {
+    const el = document.getElementById(id) as HTMLElement | null;
+    return el?.innerText ?? "";
+  }, CUPO_NATIONAL_PANEL);
+}
+
+/**
+ * After a card switch, poll the national cupo panel until its text differs from the
+ * pre-switch snapshot (the AJAX partial-response has been applied), or the timeout
+ * elapses — after which the response has certainly landed, so the read is still
+ * correct even when two cards happen to share an identical national cupo.
+ */
+async function waitForCupoPanelChange(
+  frame: Frame,
+  previousText: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const current = await readCupoNationalText(frame);
+    if (current && current !== previousText) return true;
+    await delay(400);
+  }
+  return false;
+}
+
+/** Read one card's raw cupo reading (label + both panel texts) from the displayed frame. */
+async function readCupoReading(frame: Frame): Promise<BciCupoReading> {
+  return frame.evaluate(
+    (natId: string, intId: string) => {
+      const select =
+        (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
+        (Array.from(document.querySelectorAll("select")).find((s) =>
+          Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
+        ) ?? null);
+      const label =
+        select?.options[select.selectedIndex]?.textContent?.trim() ||
+        select?.options[0]?.textContent?.trim() ||
+        "";
+      const panelText = (id: string) => {
+        const el = document.getElementById(id) as HTMLElement | null;
+        return el?.innerText ?? "";
+      };
+      const nationalText = panelText(natId) || (document.body?.innerText || "");
+      const internationalText = panelText(intId) || (document.body?.innerText || "");
+      return { label, nationalText, internationalText };
+    },
+    CUPO_NATIONAL_PANEL,
+    CUPO_INTERNATIONAL_PANEL,
+  );
+}
+
 // ─── Result assembly ─────────────────────────────────────────────
 
 /**
@@ -467,6 +526,35 @@ export interface BciCupoReading {
   label: string;
   nationalText: string;
   internationalText: string;
+}
+
+export interface CupoDropdownOption {
+  value: string;
+  label: string;
+}
+
+export interface CupoReadStep extends CupoDropdownOption {
+  /** Whether this card must be switched to first (false for the default-selected card). */
+  needsSwitch: boolean;
+}
+
+/**
+ * Decide the order in which the cupo dropdown's cards are read.
+ *
+ * The default-selected card is read first with no switch (and no panel poll); every
+ * other option follows in dropdown order, each requiring a switch + change-poll. This
+ * is the only branching decision the browser loop needs, kept pure so it can be tested
+ * without a browser. An empty options list (no dropdown) yields an empty plan, and the
+ * caller degrades to a single read of whatever is displayed.
+ */
+export function planCupoReads(
+  options: CupoDropdownOption[],
+  selectedIndex: number,
+): CupoReadStep[] {
+  if (options.length === 0) return [];
+  const defaultIndex = selectedIndex >= 0 && selectedIndex < options.length ? selectedIndex : 0;
+  const ordered = [options[defaultIndex], ...options.filter((_, i) => i !== defaultIndex)];
+  return ordered.map((opt, i) => ({ ...opt, needsSwitch: i > 0 }));
 }
 
 /**
@@ -674,31 +762,58 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
         const cupoFrame = await waitForFrame(page, IFRAME_PATTERNS.tcCupo, 15000);
         if (cupoFrame) {
           await delay(3000);
-          // Read the currently-displayed (default) card only: one raw reading of
-          // the two cupo panels, tagged with the selected dropdown label so
-          // assignBciCupos can bind it to its card. Dropdown switching for the
-          // remaining cards is a separate step, not done here.
-          const reading = await cupoFrame.evaluate(() => {
+
+          // Enumerate the cupo frame's OWN dropdown (not the separately-read card
+          // list) — it is the source of truth for what is switchable on this page.
+          const { options, selectedIndex } = await cupoFrame.evaluate(() => {
             const select =
               (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
               (Array.from(document.querySelectorAll("select")).find((s) =>
                 Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
               ) ?? null);
-            const label =
-              select?.options[select.selectedIndex]?.textContent?.trim() ||
-              select?.options[0]?.textContent?.trim() ||
-              "";
-            const panelText = (id: string) => {
-              const el = document.getElementById(id) as HTMLElement | null;
-              return el?.innerText ?? "";
+            if (!select) return { options: [] as Array<{ value: string; label: string }>, selectedIndex: -1 };
+            return {
+              options: Array.from(select.options).map((o) => ({ value: o.value, label: o.textContent?.trim() || "" })),
+              selectedIndex: select.selectedIndex,
             };
-            const nationalText = panelText("tarjetasGeneral:saldosNac") || (document.body?.innerText || "");
-            const internationalText =
-              panelText("tarjetasGeneral:infoSaldosInternacional") || (document.body?.innerText || "");
-            return { label, nationalText, internationalText };
           });
-          debugLog.push(`  Cupo: displayed card "${reading.label}"`);
-          creditCards = assignBciCupos(creditCards, [reading]);
+
+          const readings: BciCupoReading[] = [];
+          const plan = planCupoReads(options, selectedIndex);
+
+          if (plan.length === 0) {
+            // No card dropdown — degrade to a single read of whatever is displayed.
+            const reading = await readCupoReading(cupoFrame);
+            debugLog.push(`  Cupo: no dropdown, single read "${reading.label}"`);
+            readings.push(reading);
+          } else {
+            debugLog.push(`  Cupo: ${plan.length} card(s) in dropdown, reading default first`);
+            for (const step of plan) {
+              if (step.needsSwitch) {
+                // Snapshot the national panel, switch the dropdown (a JSF AJAX partial
+                // postback re-renders both panels in place — the iframe is not navigated,
+                // so the frame handle stays valid; no re-acquire), then poll saldosNac
+                // until it changes. The DOM-change poll is the sole wait signal — the XHR
+                // interceptor cannot read the XML partial-response and is not used here.
+                const snapshot = await readCupoNationalText(cupoFrame);
+                await cupoFrame.evaluate((value: string) => {
+                  const select =
+                    (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
+                    (Array.from(document.querySelectorAll("select")).find((s) =>
+                      Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
+                    ) ?? null);
+                  if (!select) return;
+                  select.value = value;
+                  select.dispatchEvent(new Event("change", { bubbles: true }));
+                }, step.value);
+                const changed = await waitForCupoPanelChange(cupoFrame, snapshot, 8000);
+                debugLog.push(`  Cupo: switched to "${step.label}" (panel ${changed ? "updated" : "timeout"})`);
+              }
+              readings.push(await readCupoReading(cupoFrame));
+            }
+          }
+
+          creditCards = assignBciCupos(creditCards, readings);
         }
       }
     }

@@ -115,7 +115,7 @@ describe("assembleBciResult", () => {
     expect(accounts[0].movements.some((m) => m.source !== MOVEMENT_SOURCE.account)).toBe(false);
 
     expect(out).toHaveLength(1);
-    expect(out![0].movements.map((m) => m.description)).toEqual(["DECATHLON VINA", "MUBI.COM MUBI"]);
+    expect(out![0].movements!.map((m) => m.description)).toEqual(["DECATHLON VINA", "MUBI.COM MUBI"]);
   });
 
   it("routes each card's movements to its own entry", () => {
@@ -127,8 +127,8 @@ describe("assembleBciResult", () => {
     const { creditCards: out } = assembleBciResult(0, [], creditCards);
 
     expect(out).toHaveLength(2);
-    expect(out![0].movements.map((m) => m.description)).toEqual(["VISA PURCHASE"]);
-    expect(out![1].movements.map((m) => m.description)).toEqual(["MASTERCARD PURCHASE"]);
+    expect(out![0].movements!.map((m) => m.description)).toEqual(["VISA PURCHASE"]);
+    expect(out![1].movements!.map((m) => m.description)).toEqual(["MASTERCARD PURCHASE"]);
   });
 
   it("returns undefined creditCards when there are none", () => {

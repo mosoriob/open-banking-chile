@@ -25,7 +25,9 @@
     "start": "node dist/cli.js",
     "prepare": "npm run build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "sandcastle": "npx tsx .sandcastle/main.ts"
   },
   "keywords": [
     "open-banking",
@@ -56,11 +58,14 @@
     "dotenv": "^17.3.1",
     "playwright-core": "^1.59.1",
     "puppeteer-core": "^24.0.0",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@ai-hero/sandcastle": "^0.10.0",
     "@types/node": "^20",
     "tsup": "^8.5.1",
+    "tsx": "^4.22.4",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   }

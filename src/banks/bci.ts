@@ -269,13 +269,14 @@ async function extractTCMovements(
     // Estructura real de la tabla (5 columnas):
     //   td[0]  fecha
     //   td[1]  descripción + opcional .cont-circle
-    //   td[2]  tipo de tarjeta  ← no se usa
+    //   td[2]  tipo de tarjeta — identifica a qué tarjeta pertenece la fila
     //   td[3]  div.container_monto > p (monto) + img (alt="Cargo"|"Abono")
     //   td[4]  flecha de detalle  ← ignorar
     const rawRows = await frame.evaluate(() => {
       const results: Array<{
         date: string;
         description: string;
+        cardType: string;
         rawAmount: string;
         isCargo: boolean;
         pendingConfirmation: boolean;
@@ -295,6 +296,8 @@ async function extractTCMovements(
 
         const pendingConfirmation = !!cells[1]?.querySelector(".cont-circle");
 
+        const cardType = cells[2]?.textContent?.trim() ?? "";
+
         const montoCell = cells[3];
         const montoP = montoCell?.querySelector(".container_monto p, p") as HTMLElement | null;
         const rawAmount = montoP?.textContent?.trim() ?? "";
@@ -304,12 +307,16 @@ async function extractTCMovements(
 
         if (!rawAmount) continue;
 
-        results.push({ date, description, rawAmount, isCargo, pendingConfirmation });
+        results.push({ date, description, cardType, rawAmount, isCargo, pendingConfirmation });
       }
       return results;
     });
 
     debugLog.push(`    ${tab}/${billingType} página ${pageIndex + 1}: ${rawRows.length} filas`);
+    const distinctCardTypes = [...new Set(rawRows.map((r) => r.cardType).filter(Boolean))];
+    if (distinctCardTypes.length) {
+      debugLog.push(`    ${tab}/${billingType} columna tipo-tarjeta: ${JSON.stringify(distinctCardTypes)}`);
+    }
 
     for (const r of rawRows) {
       const absAmount = parseChileanAmount(r.rawAmount);
@@ -321,6 +328,7 @@ async function extractTCMovements(
         amount: r.isCargo ? -absAmount : absAmount,
         balance: 0,
         source,
+        card: r.cardType || undefined,
       });
     }
 
@@ -387,6 +395,282 @@ async function waitForTableChange(
   return false;
 }
 
+// ─── Cupo dropdown switching (browser-driven, no testable branching) ──
+
+const CUPO_NATIONAL_PANEL = "tarjetasGeneral:saldosNac";
+const CUPO_INTERNATIONAL_PANEL = "tarjetasGeneral:infoSaldosInternacional";
+
+/** innerText of the national cupo panel, used as the change-poll snapshot signal. */
+async function readCupoNationalText(frame: Frame): Promise<string> {
+  return frame.evaluate((id: string) => {
+    const el = document.getElementById(id) as HTMLElement | null;
+    return el?.innerText ?? "";
+  }, CUPO_NATIONAL_PANEL);
+}
+
+/**
+ * After a card switch, poll the national cupo panel until its text differs from the
+ * pre-switch snapshot (the AJAX partial-response has been applied), or the timeout
+ * elapses — after which the response has certainly landed, so the read is still
+ * correct even when two cards happen to share an identical national cupo.
+ */
+async function waitForCupoPanelChange(
+  frame: Frame,
+  previousText: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const current = await readCupoNationalText(frame);
+    if (current && current !== previousText) return true;
+    await delay(400);
+  }
+  return false;
+}
+
+/** Read one card's raw cupo reading (label + both panel texts) from the displayed frame. */
+async function readCupoReading(frame: Frame): Promise<BciCupoReading> {
+  return frame.evaluate(
+    (natId: string, intId: string) => {
+      const select =
+        (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
+        (Array.from(document.querySelectorAll("select")).find((s) =>
+          Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
+        ) ?? null);
+      const label =
+        select?.options[select.selectedIndex]?.textContent?.trim() ||
+        select?.options[0]?.textContent?.trim() ||
+        "";
+      const panelText = (id: string) => {
+        const el = document.getElementById(id) as HTMLElement | null;
+        return el?.innerText ?? "";
+      };
+      const nationalText = panelText(natId) || (document.body?.innerText || "");
+      const internationalText = panelText(intId) || (document.body?.innerText || "");
+      return { label, nationalText, internationalText };
+    },
+    CUPO_NATIONAL_PANEL,
+    CUPO_INTERNATIONAL_PANEL,
+  );
+}
+
+/**
+ * Enumerate the cupo frame's OWN card dropdown (not the separately-read card list) —
+ * it is the source of truth for what is switchable on this page. Returns an empty
+ * options list and `selectedIndex` of -1 when no dropdown is present.
+ */
+async function readCupoDropdown(
+  frame: Frame,
+): Promise<{ options: CupoDropdownOption[]; selectedIndex: number }> {
+  return frame.evaluate(() => {
+    const select =
+      (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
+      (Array.from(document.querySelectorAll("select")).find((s) =>
+        Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
+      ) ?? null);
+    if (!select) return { options: [] as Array<{ value: string; label: string }>, selectedIndex: -1 };
+    return {
+      options: Array.from(select.options).map((o) => ({ value: o.value, label: o.textContent?.trim() || "" })),
+      selectedIndex: select.selectedIndex,
+    };
+  });
+}
+
+/**
+ * Switch the cupo dropdown to the card with the given option value, firing the JSF
+ * `change` handler. A no-op if the dropdown can't be found. The change triggers an
+ * AJAX partial postback that re-renders both panels in place without navigating the
+ * iframe, so the caller's frame handle stays valid.
+ */
+async function selectCupoCard(frame: Frame, value: string): Promise<void> {
+  await frame.evaluate((target: string) => {
+    const select =
+      (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
+      (Array.from(document.querySelectorAll("select")).find((s) =>
+        Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
+      ) ?? null);
+    if (!select) return;
+    select.value = target;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+}
+
+// ─── Result assembly ─────────────────────────────────────────────
+
+/**
+ * Build the final BCI scrape result from already-separated inputs.
+ *
+ * Account movements and per-card movements live in distinct buckets: credit-card
+ * transactions must never leak into the checking account. (Previously every card
+ * movement was pushed onto the single account, leaving the cards themselves empty.)
+ */
+/**
+ * Distribute a flat list of credit-card movements across the known cards.
+ *
+ * BCI's "Mis movimientos" table lists every card's movements together; the
+ * card-type column (tagged onto each movement as `card`) is what tells them
+ * apart. We match a movement to a card by the card's last-4 digits (when the
+ * tag carries a number) or by brand (visa / mastercard). A movement that
+ * matches no card is left unassigned rather than duplicated onto every card.
+ */
+export function routeBciCardMovements(
+  creditCards: CreditCardBalance[],
+  movements: BankMovement[],
+): CreditCardBalance[] {
+  return creditCards.map((card) => {
+    const last4 = card.label.match(/(\d{4})(?!.*\d)/)?.[1];
+    const brand = /mastercard/i.test(card.label)
+      ? "mastercard"
+      : /visa/i.test(card.label)
+        ? "visa"
+        : undefined;
+    const mine = movements.filter((m) => {
+      const tag = (m.card ?? "").toLowerCase();
+      if (!tag) return false;
+      if (last4 && tag.replace(/\D/g, "").includes(last4)) return true;
+      if (brand && tag.includes(brand)) return true;
+      return false;
+    });
+    return { ...card, movements: deduplicateMovements(mine) };
+  });
+}
+
+// ─── Cupo (credit limit) parsing & assignment ────────────────────
+
+/** National amounts: digits only → integer. Dots are thousands separators. */
+function parseClp(text: string): number {
+  return parseInt(text.replace(/[^0-9]/g, ""), 10) || 0;
+}
+
+/**
+ * International (USD) amounts: dots are thousands separators and the comma is the
+ * decimal separator. Strip to `[\d.,]`, drop the thousands dots, turn the decimal
+ * comma into a point, then parse as a float (stored as float dollars).
+ * Fixes the prior bug where `US$363,68` was read as `36368` instead of `363.68`.
+ */
+function parseUsd(text: string): number {
+  const cleaned = text.replace(/[^\d.,]/g, "").replace(/\./g, "").replace(/,/g, ".");
+  return parseFloat(cleaned) || 0;
+}
+
+/**
+ * First occurrence of `<keyword> ... $<amount>` in a panel's text. Taking the
+ * first match yields the regular cupo and ignores the `Avances` (cash-advance)
+ * sub-limit, which appears later in the same panel.
+ */
+function firstCupoField(text: string, keyword: string): string | undefined {
+  const match = text.match(new RegExp(`${keyword}[^\\d$]*\\$?\\s*([\\d.,]+)`, "i"));
+  return match?.[1];
+}
+
+export interface BciCupoReading {
+  label: string;
+  nationalText: string;
+  internationalText: string;
+}
+
+export interface CupoDropdownOption {
+  value: string;
+  label: string;
+}
+
+export interface CupoReadStep extends CupoDropdownOption {
+  /** Whether this card must be switched to first (false for the default-selected card). */
+  needsSwitch: boolean;
+}
+
+/**
+ * Decide the order in which the cupo dropdown's cards are read.
+ *
+ * The default-selected card is read first with no switch (and no panel poll); every
+ * other option follows in dropdown order, each requiring a switch + change-poll. This
+ * is the only branching decision the browser loop needs, kept pure so it can be tested
+ * without a browser. An empty options list (no dropdown) yields an empty plan, and the
+ * caller degrades to a single read of whatever is displayed.
+ */
+export function planCupoReads(
+  options: CupoDropdownOption[],
+  selectedIndex: number,
+): CupoReadStep[] {
+  if (options.length === 0) return [];
+  const defaultIndex = selectedIndex >= 0 && selectedIndex < options.length ? selectedIndex : 0;
+  const ordered = [options[defaultIndex], ...options.filter((_, i) => i !== defaultIndex)];
+  return ordered.map((opt, i) => ({ ...opt, needsSwitch: i > 0 }));
+}
+
+/**
+ * Parse one cupo panel's text into a `{ used, available, total }` reading with
+ * the given amount parser (parseClp for national, parseUsd for international).
+ * Returns undefined when the total is 0 or unreadable, so the caller leaves that
+ * cupo unset rather than emitting zeros.
+ */
+function parseCupoPanel(
+  text: string,
+  parseAmount: (t: string) => number,
+): { used: number; available: number; total: number } | undefined {
+  const total = parseAmount(firstCupoField(text, "total") ?? "");
+  if (total <= 0) return undefined;
+  return {
+    used: parseAmount(firstCupoField(text, "utilizado") ?? ""),
+    available: parseAmount(firstCupoField(text, "disponible") ?? ""),
+    total,
+  };
+}
+
+/** Last-4 digits of a card label (`(\d{4})(?!.*\d)`), the idiom routeBciCardMovements uses. */
+function cardLast4(label: string): string | undefined {
+  return label.match(/(\d{4})(?!.*\d)/)?.[1];
+}
+
+/**
+ * Pure seam for BCI per-card cupo: bind each raw panel reading to its card and
+ * assign that card its own national / international cupo.
+ *
+ * - Parsing: national via parseClp (integer pesos), international via parseUsd
+ *   (float dollars, comma decimals).
+ * - Field extraction: first total / utilizado / disponible match per panel — the
+ *   regular cupo, not the Avances sub-limit.
+ * - Binding: by last-4 of the label, falling back to exact-label match; reading
+ *   order is irrelevant.
+ * - Guards: national assigned only when its total > 0, international only when its
+ *   total > 0. A card with no matching reading (or a total-0 read) is left with
+ *   national/international undefined — never zeros, never another card's values.
+ */
+export function assignBciCupos(
+  creditCards: CreditCardBalance[],
+  readings: BciCupoReading[],
+): CreditCardBalance[] {
+  return creditCards.map((card) => {
+    const last4 = cardLast4(card.label);
+    const reading =
+      (last4 ? readings.find((r) => cardLast4(r.label) === last4) : undefined) ??
+      readings.find((r) => r.label === card.label);
+    if (!reading) return { ...card };
+
+    const result: CreditCardBalance = { ...card };
+
+    const national = parseCupoPanel(reading.nationalText, parseClp);
+    if (national) result.national = national;
+
+    const international = parseCupoPanel(reading.internationalText, parseUsd);
+    if (international) result.international = { ...international, currency: "USD" };
+
+    return result;
+  });
+}
+
+export function assembleBciResult(
+  balance: number | undefined,
+  accountMovements: BankMovement[],
+  creditCards: CreditCardBalance[],
+): { accounts: AccountBalance[]; creditCards: CreditCardBalance[] | undefined } {
+  const accounts: AccountBalance[] = [
+    { balance, movements: deduplicateMovements(accountMovements) },
+  ];
+  const cards = creditCards.map((c) => ({ ...c, movements: deduplicateMovements(c.movements ?? []) }));
+  return { accounts, creditCards: cards.length > 0 ? cards : undefined };
+}
+
 // ─── Main scrape function ────────────────────────────────────────
 
 async function scrapeBci(session: BrowserSession, options: ScraperOptions): Promise<ScrapeResult> {
@@ -414,7 +698,7 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
   // Account movements
   progress("Extrayendo movimientos de cuenta...");
   debugLog.push("5. Fetching account movements...");
-  const allMovements: BankMovement[] = [];
+  const accountMovements: BankMovement[] = [];
   let balance: number | undefined;
 
   if (await clickByTitle(page, "Últimos Movimientos")) {
@@ -429,7 +713,7 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
         const apiMovements = normalizeBciApiMovements(captured);
         debugLog.push(`  Checking API movements: ${apiMovements.length}`);
         if (apiMovements.length > 0) {
-          allMovements.push(...apiMovements);
+          accountMovements.push(...apiMovements);
           // Still extract balance from the iframe DOM
           balance = await movFrame.evaluate(() => {
             const el = document.querySelector("#saldoDis + div, .bci-h2-w800");
@@ -441,7 +725,7 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
         }
       }
 
-      if (allMovements.length === 0) {
+      if (accountMovements.length === 0) {
         debugLog.push("  Checking API: no data, falling back to HTML extraction");
         const accounts = await movFrame.evaluate((sel: string) => {
           const select = document.querySelector(sel) as HTMLSelectElement | null;
@@ -471,16 +755,21 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
           }
           const movements = await extractMovementsFromFrame(movFrame, debugLog);
           const prefixed = accounts.length > 1 ? movements.map(m => ({ ...m, description: `[${accounts[i].label}] ${m.description}`.trim() })) : movements;
-          allMovements.push(...prefixed);
+          accountMovements.push(...prefixed);
         }
       }
     }
   }
 
-  // Credit cards
+  // Credit cards — BCI's "Mis movimientos" table lists every card's movements
+  // together (the select.tdc dropdown does NOT filter the table), so we extract
+  // the table once and route each movement to its card via the card-type column
+  // captured in extractTCMovements. Movements never leak into the checking
+  // account (handled by assembleBciResult), and routing keeps each card's
+  // movements distinct instead of duplicating them onto every card.
   progress("Extrayendo datos de tarjeta de crédito...");
   debugLog.push("6. Navigating to credit cards...");
-  const creditCards: CreditCardBalance[] = [];
+  let creditCards: CreditCardBalance[] = [];
   if (await clickByTitle(page, "Tarjetas")) {
     await delay(3000);
     const cardLabels = await page.evaluate(() => {
@@ -488,14 +777,25 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
       if (selects.length === 0) return [];
       return Array.from((selects[0] as HTMLSelectElement).options).map((o) => o.textContent?.trim() || "");
     });
+    // One entry per card up front, so a card still surfaces even when its
+    // movement extraction yields nothing.
+    for (const label of cardLabels) creditCards.push({ label, movements: [] });
 
     if (cardLabels.length > 0 && await clickByTitle(page, "Mis movimientos")) {
       const tcFrame = await waitForFrame(page, IFRAME_PATTERNS.tcMovements, 15000);
       if (tcFrame) {
         await delay(3000);
+        const tcMovements: BankMovement[] = [];
         for (const { tab, billingType, source } of TC_COMBINATIONS) {
           const movements = await extractTCMovements(tcFrame, tab, billingType, source, debugLog);
-          allMovements.push(...movements);
+          tcMovements.push(...movements);
+        }
+        creditCards = routeBciCardMovements(creditCards, tcMovements);
+        const routed = creditCards.reduce((s, c) => s + (c.movements?.length ?? 0), 0);
+        debugLog.push(`  TC: ${tcMovements.length} movements extracted, ${routed} routed to ${creditCards.length} card(s)`);
+        for (const c of creditCards) debugLog.push(`    Card "${c.label}": ${c.movements?.length ?? 0} movements`);
+        if (tcMovements.length > routed) {
+          debugLog.push(`  WARNING: ${tcMovements.length - routed} TC movement(s) matched no card (check tipo-tarjeta column values above)`);
         }
       }
 
@@ -503,35 +803,46 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
         const cupoFrame = await waitForFrame(page, IFRAME_PATTERNS.tcCupo, 15000);
         if (cupoFrame) {
           await delay(3000);
-          const cupoData = await cupoFrame.evaluate(() => {
-            const bodyText = document.body?.innerText || "";
-            const parseAmt = (t: string) => parseInt(t.replace(/[^0-9]/g, ""), 10) || 0;
-            const natUsed = bodyText.match(/utilizado\s*(?:nacional)?\s*\$?\s*([\d.]+)/i);
-            const natAvail = bodyText.match(/disponible\s*(?:nacional)?\s*\$?\s*([\d.]+)/i);
-            const natTotal = bodyText.match(/total\s*(?:nacional)?\s*\$?\s*([\d.]+)/i);
-            const intUsed = bodyText.match(/utilizado\s*(?:internacional)?\s*USD?\s*\$?\s*([\d.,]+)/i);
-            const intAvail = bodyText.match(/disponible\s*(?:internacional)?\s*USD?\s*\$?\s*([\d.,]+)/i);
-            const intTotal = bodyText.match(/total\s*(?:internacional)?\s*USD?\s*\$?\s*([\d.,]+)/i);
-            return { nationalUsed: natUsed ? parseAmt(natUsed[1]) : 0, nationalAvailable: natAvail ? parseAmt(natAvail[1]) : 0, nationalTotal: natTotal ? parseAmt(natTotal[1]) : 0, internationalUsed: intUsed ? parseAmt(intUsed[1]) : 0, internationalAvailable: intAvail ? parseAmt(intAvail[1]) : 0, internationalTotal: intTotal ? parseAmt(intTotal[1]) : 0 };
-          });
-          for (const label of cardLabels) {
-            const card: CreditCardBalance = { label, national: { used: cupoData.nationalUsed, available: cupoData.nationalAvailable, total: cupoData.nationalTotal }, movements: [] };
-            if (cupoData.internationalTotal > 0) card.international = { used: cupoData.internationalUsed, available: cupoData.internationalAvailable, total: cupoData.internationalTotal, currency: "USD" };
-            creditCards.push(card);
+
+          const { options, selectedIndex } = await readCupoDropdown(cupoFrame);
+          const plan = planCupoReads(options, selectedIndex);
+          const readings: BciCupoReading[] = [];
+
+          if (plan.length === 0) {
+            // No card dropdown — degrade to a single read of whatever is displayed.
+            const reading = await readCupoReading(cupoFrame);
+            debugLog.push(`  Cupo: no dropdown, single read "${reading.label}"`);
+            readings.push(reading);
+          } else {
+            debugLog.push(`  Cupo: ${plan.length} card(s) in dropdown, reading default first`);
+            for (const step of plan) {
+              if (step.needsSwitch) {
+                // Snapshot the national panel, switch the dropdown, then poll saldosNac
+                // until it changes. The DOM-change poll is the sole wait signal — the XHR
+                // interceptor cannot read the XML partial-response and is not used here.
+                const snapshot = await readCupoNationalText(cupoFrame);
+                await selectCupoCard(cupoFrame, step.value);
+                const changed = await waitForCupoPanelChange(cupoFrame, snapshot, 8000);
+                debugLog.push(`  Cupo: switched to "${step.label}" (panel ${changed ? "updated" : "timeout"})`);
+              }
+              readings.push(await readCupoReading(cupoFrame));
+            }
           }
+
+          creditCards = assignBciCupos(creditCards, readings);
         }
       }
     }
   }
 
-  const deduplicated = deduplicateMovements(allMovements);
-  debugLog.push(`  Total: ${deduplicated.length} unique movements`);
-  progress(`Listo — ${deduplicated.length} movimientos totales`);
+  const totalCardMovements = creditCards.reduce((s, c) => s + (c.movements?.length ?? 0), 0);
+  debugLog.push(`  Total: ${accountMovements.length} account + ${totalCardMovements} card movements`);
+  progress(`Listo — ${accountMovements.length + totalCardMovements} movimientos totales`);
   await doSave(page, "06-final");
   const ss = doScreenshots ? (await page.screenshot({ encoding: "base64" })) as string : undefined;
 
-  const accounts: AccountBalance[] = [{ balance, movements: deduplicated }];
-  return { success: true, bank, accounts, creditCards: creditCards.length > 0 ? creditCards : undefined, screenshot: ss, debug: debugLog.join("\n") };
+  const { accounts, creditCards: cards } = assembleBciResult(balance, accountMovements, creditCards);
+  return { success: true, bank, accounts, creditCards: cards, screenshot: ss, debug: debugLog.join("\n") };
 }
 
 // ─── Export ──────────────────────────────────────────────────────

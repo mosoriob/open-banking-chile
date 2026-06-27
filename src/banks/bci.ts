@@ -454,6 +454,47 @@ async function readCupoReading(frame: Frame): Promise<BciCupoReading> {
   );
 }
 
+/**
+ * Enumerate the cupo frame's OWN card dropdown (not the separately-read card list) —
+ * it is the source of truth for what is switchable on this page. Returns an empty
+ * options list and `selectedIndex` of -1 when no dropdown is present.
+ */
+async function readCupoDropdown(
+  frame: Frame,
+): Promise<{ options: CupoDropdownOption[]; selectedIndex: number }> {
+  return frame.evaluate(() => {
+    const select =
+      (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
+      (Array.from(document.querySelectorAll("select")).find((s) =>
+        Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
+      ) ?? null);
+    if (!select) return { options: [] as Array<{ value: string; label: string }>, selectedIndex: -1 };
+    return {
+      options: Array.from(select.options).map((o) => ({ value: o.value, label: o.textContent?.trim() || "" })),
+      selectedIndex: select.selectedIndex,
+    };
+  });
+}
+
+/**
+ * Switch the cupo dropdown to the card with the given option value, firing the JSF
+ * `change` handler. A no-op if the dropdown can't be found. The change triggers an
+ * AJAX partial postback that re-renders both panels in place without navigating the
+ * iframe, so the caller's frame handle stays valid.
+ */
+async function selectCupoCard(frame: Frame, value: string): Promise<void> {
+  await frame.evaluate((target: string) => {
+    const select =
+      (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
+      (Array.from(document.querySelectorAll("select")).find((s) =>
+        Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
+      ) ?? null);
+    if (!select) return;
+    select.value = target;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+}
+
 // ─── Result assembly ─────────────────────────────────────────────
 
 /**
@@ -763,23 +804,9 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
         if (cupoFrame) {
           await delay(3000);
 
-          // Enumerate the cupo frame's OWN dropdown (not the separately-read card
-          // list) — it is the source of truth for what is switchable on this page.
-          const { options, selectedIndex } = await cupoFrame.evaluate(() => {
-            const select =
-              (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
-              (Array.from(document.querySelectorAll("select")).find((s) =>
-                Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
-              ) ?? null);
-            if (!select) return { options: [] as Array<{ value: string; label: string }>, selectedIndex: -1 };
-            return {
-              options: Array.from(select.options).map((o) => ({ value: o.value, label: o.textContent?.trim() || "" })),
-              selectedIndex: select.selectedIndex,
-            };
-          });
-
-          const readings: BciCupoReading[] = [];
+          const { options, selectedIndex } = await readCupoDropdown(cupoFrame);
           const plan = planCupoReads(options, selectedIndex);
+          const readings: BciCupoReading[] = [];
 
           if (plan.length === 0) {
             // No card dropdown — degrade to a single read of whatever is displayed.
@@ -790,22 +817,11 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
             debugLog.push(`  Cupo: ${plan.length} card(s) in dropdown, reading default first`);
             for (const step of plan) {
               if (step.needsSwitch) {
-                // Snapshot the national panel, switch the dropdown (a JSF AJAX partial
-                // postback re-renders both panels in place — the iframe is not navigated,
-                // so the frame handle stays valid; no re-acquire), then poll saldosNac
+                // Snapshot the national panel, switch the dropdown, then poll saldosNac
                 // until it changes. The DOM-change poll is the sole wait signal — the XHR
                 // interceptor cannot read the XML partial-response and is not used here.
                 const snapshot = await readCupoNationalText(cupoFrame);
-                await cupoFrame.evaluate((value: string) => {
-                  const select =
-                    (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
-                    (Array.from(document.querySelectorAll("select")).find((s) =>
-                      Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
-                    ) ?? null);
-                  if (!select) return;
-                  select.value = value;
-                  select.dispatchEvent(new Event("change", { bubbles: true }));
-                }, step.value);
+                await selectCupoCard(cupoFrame, step.value);
                 const changed = await waitForCupoPanelChange(cupoFrame, snapshot, 8000);
                 debugLog.push(`  Cupo: switched to "${step.label}" (panel ${changed ? "updated" : "timeout"})`);
               }

@@ -517,29 +517,34 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
     for (const opt of cardOptions) creditCards.push({ label: opt.label, movements: [] });
 
     if (cardOptions.length > 0 && await clickByTitle(page, "Mis movimientos")) {
-      const tcFrame = await waitForFrame(page, IFRAME_PATTERNS.tcMovements, 15000);
-      if (tcFrame) {
-        await delay(3000);
-        for (let i = 0; i < cardOptions.length; i++) {
-          // Switch the card selector for every card after the first.
-          if (i > 0) {
-            await page.evaluate((value: string) => {
-              const select = document.querySelector("select.tdc") as HTMLSelectElement | null;
-              if (!select) return;
-              select.value = value;
-              select.dispatchEvent(new Event("change", { bubbles: true }));
-            }, cardOptions[i].value);
-            await delay(3000);
-          }
-          const cardMovements: BankMovement[] = [];
-          for (const { tab, billingType, source } of TC_COMBINATIONS) {
-            const movements = await extractTCMovements(tcFrame, tab, billingType, source, debugLog);
-            cardMovements.push(...movements);
-          }
-          const deduped = deduplicateMovements(cardMovements);
-          creditCards[i].movements = deduped;
-          debugLog.push(`  Card "${cardOptions[i].label}": ${deduped.length} movements`);
+      for (let i = 0; i < cardOptions.length; i++) {
+        // Switch the card selector for every card after the first. Changing the
+        // selector reloads the movements iframe, which detaches the previous
+        // frame handle — so re-acquire a fresh frame on every iteration rather
+        // than reusing a stale one.
+        if (i > 0) {
+          await page.evaluate((value: string) => {
+            const select = document.querySelector("select.tdc") as HTMLSelectElement | null;
+            if (!select) return;
+            select.value = value;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+          }, cardOptions[i].value);
+          await delay(3000);
         }
+        const tcFrame = await waitForFrame(page, IFRAME_PATTERNS.tcMovements, 15000);
+        if (!tcFrame) {
+          debugLog.push(`  Card "${cardOptions[i].label}": movements frame not found`);
+          continue;
+        }
+        await delay(3000);
+        const cardMovements: BankMovement[] = [];
+        for (const { tab, billingType, source } of TC_COMBINATIONS) {
+          const movements = await extractTCMovements(tcFrame, tab, billingType, source, debugLog);
+          cardMovements.push(...movements);
+        }
+        const deduped = deduplicateMovements(cardMovements);
+        creditCards[i].movements = deduped;
+        debugLog.push(`  Card "${cardOptions[i].label}": ${deduped.length} movements`);
       }
 
       if (await clickByTitle(page, "Cupo disponible")) {

@@ -269,13 +269,14 @@ async function extractTCMovements(
     // Estructura real de la tabla (5 columnas):
     //   td[0]  fecha
     //   td[1]  descripción + opcional .cont-circle
-    //   td[2]  tipo de tarjeta  ← no se usa
+    //   td[2]  tipo de tarjeta — identifica a qué tarjeta pertenece la fila
     //   td[3]  div.container_monto > p (monto) + img (alt="Cargo"|"Abono")
     //   td[4]  flecha de detalle  ← ignorar
     const rawRows = await frame.evaluate(() => {
       const results: Array<{
         date: string;
         description: string;
+        cardType: string;
         rawAmount: string;
         isCargo: boolean;
         pendingConfirmation: boolean;
@@ -295,6 +296,8 @@ async function extractTCMovements(
 
         const pendingConfirmation = !!cells[1]?.querySelector(".cont-circle");
 
+        const cardType = cells[2]?.textContent?.trim() ?? "";
+
         const montoCell = cells[3];
         const montoP = montoCell?.querySelector(".container_monto p, p") as HTMLElement | null;
         const rawAmount = montoP?.textContent?.trim() ?? "";
@@ -304,12 +307,16 @@ async function extractTCMovements(
 
         if (!rawAmount) continue;
 
-        results.push({ date, description, rawAmount, isCargo, pendingConfirmation });
+        results.push({ date, description, cardType, rawAmount, isCargo, pendingConfirmation });
       }
       return results;
     });
 
     debugLog.push(`    ${tab}/${billingType} página ${pageIndex + 1}: ${rawRows.length} filas`);
+    const distinctCardTypes = [...new Set(rawRows.map((r) => r.cardType).filter(Boolean))];
+    if (distinctCardTypes.length) {
+      debugLog.push(`    ${tab}/${billingType} columna tipo-tarjeta: ${JSON.stringify(distinctCardTypes)}`);
+    }
 
     for (const r of rawRows) {
       const absAmount = parseChileanAmount(r.rawAmount);
@@ -321,6 +328,7 @@ async function extractTCMovements(
         amount: r.isCargo ? -absAmount : absAmount,
         balance: 0,
         source,
+        card: r.cardType || undefined,
       });
     }
 
@@ -396,6 +404,37 @@ async function waitForTableChange(
  * transactions must never leak into the checking account. (Previously every card
  * movement was pushed onto the single account, leaving the cards themselves empty.)
  */
+/**
+ * Distribute a flat list of credit-card movements across the known cards.
+ *
+ * BCI's "Mis movimientos" table lists every card's movements together; the
+ * card-type column (tagged onto each movement as `card`) is what tells them
+ * apart. We match a movement to a card by the card's last-4 digits (when the
+ * tag carries a number) or by brand (visa / mastercard). A movement that
+ * matches no card is left unassigned rather than duplicated onto every card.
+ */
+export function routeBciCardMovements(
+  creditCards: CreditCardBalance[],
+  movements: BankMovement[],
+): CreditCardBalance[] {
+  return creditCards.map((card) => {
+    const last4 = card.label.match(/(\d{4})(?!.*\d)/)?.[1];
+    const brand = /mastercard/i.test(card.label)
+      ? "mastercard"
+      : /visa/i.test(card.label)
+        ? "visa"
+        : undefined;
+    const mine = movements.filter((m) => {
+      const tag = (m.card ?? "").toLowerCase();
+      if (!tag) return false;
+      if (last4 && tag.replace(/\D/g, "").includes(last4)) return true;
+      if (brand && tag.includes(brand)) return true;
+      return false;
+    });
+    return { ...card, movements: deduplicateMovements(mine) };
+  });
+}
+
 export function assembleBciResult(
   balance: number | undefined,
   accountMovements: BankMovement[],
@@ -498,53 +537,42 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
     }
   }
 
-  // Credit cards — each card's movements are kept separate from the checking
-  // account and from each other. BCI's "Mis movimientos" table shows one card at
-  // a time, keyed by the select.tdc dropdown, so we iterate it per card,
-  // mirroring the account-select loop above.
+  // Credit cards — BCI's "Mis movimientos" table lists every card's movements
+  // together (the select.tdc dropdown does NOT filter the table), so we extract
+  // the table once and route each movement to its card via the card-type column
+  // captured in extractTCMovements. Movements never leak into the checking
+  // account (handled by assembleBciResult), and routing keeps each card's
+  // movements distinct instead of duplicating them onto every card.
   progress("Extrayendo datos de tarjeta de crédito...");
   debugLog.push("6. Navigating to credit cards...");
-  const creditCards: CreditCardBalance[] = [];
+  let creditCards: CreditCardBalance[] = [];
   if (await clickByTitle(page, "Tarjetas")) {
     await delay(3000);
-    const cardOptions = await page.evaluate(() => {
+    const cardLabels = await page.evaluate(() => {
       const selects = document.querySelectorAll("select.tdc");
       if (selects.length === 0) return [];
-      return Array.from((selects[0] as HTMLSelectElement).options).map((o) => ({ value: o.value, label: o.textContent?.trim() || "" }));
+      return Array.from((selects[0] as HTMLSelectElement).options).map((o) => o.textContent?.trim() || "");
     });
     // One entry per card up front, so a card still surfaces even when its
     // movement extraction yields nothing.
-    for (const opt of cardOptions) creditCards.push({ label: opt.label, movements: [] });
+    for (const label of cardLabels) creditCards.push({ label, movements: [] });
 
-    if (cardOptions.length > 0 && await clickByTitle(page, "Mis movimientos")) {
-      for (let i = 0; i < cardOptions.length; i++) {
-        // Switch the card selector for every card after the first. Changing the
-        // selector reloads the movements iframe, which detaches the previous
-        // frame handle — so re-acquire a fresh frame on every iteration rather
-        // than reusing a stale one.
-        if (i > 0) {
-          await page.evaluate((value: string) => {
-            const select = document.querySelector("select.tdc") as HTMLSelectElement | null;
-            if (!select) return;
-            select.value = value;
-            select.dispatchEvent(new Event("change", { bubbles: true }));
-          }, cardOptions[i].value);
-          await delay(3000);
-        }
-        const tcFrame = await waitForFrame(page, IFRAME_PATTERNS.tcMovements, 15000);
-        if (!tcFrame) {
-          debugLog.push(`  Card "${cardOptions[i].label}": movements frame not found`);
-          continue;
-        }
+    if (cardLabels.length > 0 && await clickByTitle(page, "Mis movimientos")) {
+      const tcFrame = await waitForFrame(page, IFRAME_PATTERNS.tcMovements, 15000);
+      if (tcFrame) {
         await delay(3000);
-        const cardMovements: BankMovement[] = [];
+        const tcMovements: BankMovement[] = [];
         for (const { tab, billingType, source } of TC_COMBINATIONS) {
           const movements = await extractTCMovements(tcFrame, tab, billingType, source, debugLog);
-          cardMovements.push(...movements);
+          tcMovements.push(...movements);
         }
-        const deduped = deduplicateMovements(cardMovements);
-        creditCards[i].movements = deduped;
-        debugLog.push(`  Card "${cardOptions[i].label}": ${deduped.length} movements`);
+        creditCards = routeBciCardMovements(creditCards, tcMovements);
+        const routed = creditCards.reduce((s, c) => s + (c.movements?.length ?? 0), 0);
+        debugLog.push(`  TC: ${tcMovements.length} movements extracted, ${routed} routed to ${creditCards.length} card(s)`);
+        for (const c of creditCards) debugLog.push(`    Card "${c.label}": ${c.movements?.length ?? 0} movements`);
+        if (tcMovements.length > routed) {
+          debugLog.push(`  WARNING: ${tcMovements.length - routed} TC movement(s) matched no card (check tipo-tarjeta column values above)`);
+        }
       }
 
       if (await clickByTitle(page, "Cupo disponible")) {

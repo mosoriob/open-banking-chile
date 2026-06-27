@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { MOVEMENT_SOURCE } from "../types.js";
 import type { BankMovement, CreditCardBalance } from "../types.js";
-import { normalizeBciApiMovements, assembleBciResult } from "./bci.js";
+import { normalizeBciApiMovements, assembleBciResult, routeBciCardMovements } from "./bci.js";
 
 describe("normalizeBciApiMovements", () => {
   it("returns empty array for empty captures", () => {
@@ -135,5 +135,44 @@ describe("assembleBciResult", () => {
     const { accounts, creditCards: out } = assembleBciResult(0, [acct("x")], []);
     expect(accounts[0].movements).toHaveLength(1);
     expect(out).toBeUndefined();
+  });
+});
+
+describe("routeBciCardMovements", () => {
+  const tagged = (description: string, card: string): BankMovement => ({
+    date: "01-06-2026", description, amount: -2000, balance: 0,
+    source: MOVEMENT_SOURCE.credit_card_billed, card,
+  });
+  const cards = (): CreditCardBalance[] => [
+    { label: "bciplus visa gold - 0043", movements: [] },
+    { label: "bciplus mastercard gold - 3725", movements: [] },
+  ];
+
+  it("routes by brand when the card-type column carries the brand", () => {
+    const movements = [tagged("VISA TX", "VISA"), tagged("MC TX", "MASTERCARD")];
+    const out = routeBciCardMovements(cards(), movements);
+    expect(out[0].movements!.map((m) => m.description)).toEqual(["VISA TX"]);
+    expect(out[1].movements!.map((m) => m.description)).toEqual(["MC TX"]);
+  });
+
+  it("routes by last-4 when the card-type column carries a masked number", () => {
+    const movements = [tagged("VISA TX", "**** 0043"), tagged("MC TX", "**** 3725")];
+    const out = routeBciCardMovements(cards(), movements);
+    expect(out[0].movements!.map((m) => m.description)).toEqual(["VISA TX"]);
+    expect(out[1].movements!.map((m) => m.description)).toEqual(["MC TX"]);
+  });
+
+  it("does not duplicate a movement onto a non-matching card", () => {
+    const movements = [tagged("VISA TX", "VISA")];
+    const out = routeBciCardMovements(cards(), movements);
+    expect(out[0].movements).toHaveLength(1);
+    expect(out[1].movements).toHaveLength(0);
+  });
+
+  it("leaves movements unassigned when the tag matches no card", () => {
+    const movements = [tagged("MYSTERY", "DINERS")];
+    const out = routeBciCardMovements(cards(), movements);
+    expect(out[0].movements).toHaveLength(0);
+    expect(out[1].movements).toHaveLength(0);
   });
 });

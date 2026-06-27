@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { MOVEMENT_SOURCE } from "../types.js";
 import type { BankMovement, CreditCardBalance } from "../types.js";
-import { normalizeBciApiMovements, assembleBciResult, routeBciCardMovements } from "./bci.js";
+import { normalizeBciApiMovements, assembleBciResult, routeBciCardMovements, assignBciCupos } from "./bci.js";
 
 describe("normalizeBciApiMovements", () => {
   it("returns empty array for empty captures", () => {
@@ -174,5 +174,115 @@ describe("routeBciCardMovements", () => {
     const out = routeBciCardMovements(cards(), movements);
     expect(out[0].movements).toHaveLength(0);
     expect(out[1].movements).toHaveLength(0);
+  });
+});
+
+describe("assignBciCupos", () => {
+  const cards = (): CreditCardBalance[] => [
+    { label: "bciplus visa gold - 0043", movements: [] },
+    { label: "bciplus mastercard gold - 3725", movements: [] },
+  ];
+
+  // Realistic BCI "Cupo disponible" national panel copy. The regular cupo
+  // comes first; the Avances (cash-advance) sub-limit follows and must be ignored.
+  const natPanel = (total: string, used: string, avail: string) =>
+    `Cupo Nacional\nCupo Total $${total}\nUtilizado $${used}\nDisponible $${avail}\n` +
+    `Avances\nCupo Total $2.000.000\nUtilizado $1.000.000\nDisponible $1.000.000`;
+
+  const intPanel = (total: string, used: string, avail: string) =>
+    `Cupo Internacional\nCupo Total US$${total}\nUtilizado US$${used}\nDisponible US$${avail}`;
+
+  it("binds distinct national cupos to each card by last-4", () => {
+    const readings = [
+      { label: "bciplus visa gold - 0043", nationalText: natPanel("10.000.000", "5.909.327", "4.090.673"), internationalText: "" },
+      { label: "bciplus mastercard gold - 3725", nationalText: natPanel("1.000.000", "0", "1.000.000"), internationalText: "" },
+    ];
+    const out = assignBciCupos(cards(), readings);
+    expect(out[0].national).toEqual({ total: 10000000, used: 5909327, available: 4090673 });
+    expect(out[1].national).toEqual({ total: 1000000, used: 0, available: 1000000 });
+  });
+
+  it("parses national amounts as whole-peso integers", () => {
+    const readings = [
+      { label: "bciplus visa gold - 0043", nationalText: natPanel("10.000.000", "0", "10.000.000"), internationalText: "" },
+    ];
+    const out = assignBciCupos(cards(), readings);
+    expect(out[0].national!.total).toBe(10000000);
+  });
+
+  it("parses international USD amounts as float dollars (decimal fix)", () => {
+    const readings = [
+      { label: "bciplus visa gold - 0043", nationalText: "", internationalText: intPanel("363,68", "0,00", "363,68") },
+      { label: "bciplus mastercard gold - 3725", nationalText: "", internationalText: intPanel("1.234,56", "234,56", "1.000,00") },
+    ];
+    const out = assignBciCupos(cards(), readings);
+    expect(out[0].international).toEqual({ total: 363.68, used: 0, available: 363.68, currency: "USD" });
+    expect(out[1].international).toEqual({ total: 1234.56, used: 234.56, available: 1000, currency: "USD" });
+  });
+
+  it("takes the regular cupo, not the Avances sub-limit", () => {
+    const readings = [
+      { label: "bciplus visa gold - 0043", nationalText: natPanel("10.000.000", "5.909.327", "4.090.673"), internationalText: "" },
+    ];
+    const out = assignBciCupos(cards(), readings);
+    // Avances values are 2.000.000 / 1.000.000 / 1.000.000 — must not leak in.
+    expect(out[0].national).toEqual({ total: 10000000, used: 5909327, available: 4090673 });
+  });
+
+  it("binds by last-4 independent of reading order", () => {
+    const readings = [
+      { label: "bciplus mastercard gold - 3725", nationalText: natPanel("1.000.000", "0", "1.000.000"), internationalText: "" },
+      { label: "bciplus visa gold - 0043", nationalText: natPanel("10.000.000", "5.909.327", "4.090.673"), internationalText: "" },
+    ];
+    const out = assignBciCupos(cards(), readings);
+    expect(out[0].national!.total).toBe(10000000); // visa card, first in cards()
+    expect(out[1].national!.total).toBe(1000000); // mastercard card, second in cards()
+  });
+
+  it("leaves a card with no matching reading untouched (never another card's values)", () => {
+    const readings = [
+      { label: "bciplus visa gold - 0043", nationalText: natPanel("10.000.000", "5.909.327", "4.090.673"), internationalText: "" },
+    ];
+    const out = assignBciCupos(cards(), readings);
+    expect(out[0].national!.total).toBe(10000000);
+    expect(out[1].national).toBeUndefined();
+    expect(out[1].international).toBeUndefined();
+  });
+
+  it("omits national when its total is 0", () => {
+    const readings = [
+      { label: "bciplus visa gold - 0043", nationalText: "Cupo Nacional\nNo disponible", internationalText: "" },
+    ];
+    const out = assignBciCupos(cards(), readings);
+    expect(out[0].national).toBeUndefined();
+  });
+
+  it("omits international when its total is 0", () => {
+    const readings = [
+      { label: "bciplus visa gold - 0043", nationalText: natPanel("10.000.000", "0", "10.000.000"), internationalText: "" },
+    ];
+    const out = assignBciCupos(cards(), readings);
+    expect(out[0].international).toBeUndefined();
+  });
+
+  it("keeps every card's label and movements intact", () => {
+    const withTx: CreditCardBalance[] = [
+      { label: "bciplus visa gold - 0043", movements: [{ date: "01-06-2026", description: "TX", amount: -1000, balance: 0, source: MOVEMENT_SOURCE.credit_card_billed }] },
+    ];
+    const readings = [
+      { label: "bciplus visa gold - 0043", nationalText: natPanel("10.000.000", "0", "10.000.000"), internationalText: "" },
+    ];
+    const out = assignBciCupos(withTx, readings);
+    expect(out[0].label).toBe("bciplus visa gold - 0043");
+    expect(out[0].movements!.map((m) => m.description)).toEqual(["TX"]);
+  });
+
+  it("falls back to exact-label match when no last-4 is present", () => {
+    const cardsNoDigits: CreditCardBalance[] = [{ label: "Tarjeta de Crédito", movements: [] }];
+    const readings = [
+      { label: "Tarjeta de Crédito", nationalText: natPanel("500.000", "100.000", "400.000"), internationalText: "" },
+    ];
+    const out = assignBciCupos(cardsNoDigits, readings);
+    expect(out[0].national).toEqual({ total: 500000, used: 100000, available: 400000 });
   });
 });

@@ -435,6 +435,95 @@ export function routeBciCardMovements(
   });
 }
 
+// ─── Cupo (credit limit) parsing & assignment ────────────────────
+
+/** National amounts: digits only → integer. Dots are thousands separators. */
+function parseClp(text: string): number {
+  return parseInt(text.replace(/[^0-9]/g, ""), 10) || 0;
+}
+
+/**
+ * International (USD) amounts: dots are thousands separators and the comma is the
+ * decimal separator. Strip to `[\d.,]`, drop the thousands dots, turn the decimal
+ * comma into a point, then parse as a float (stored as float dollars).
+ * Fixes the prior bug where `US$363,68` was read as `36368` instead of `363.68`.
+ */
+function parseUsd(text: string): number {
+  const cleaned = text.replace(/[^\d.,]/g, "").replace(/\./g, "").replace(/,/g, ".");
+  return parseFloat(cleaned) || 0;
+}
+
+/**
+ * First occurrence of `<keyword> ... $<amount>` in a panel's text. Taking the
+ * first match yields the regular cupo and ignores the `Avances` (cash-advance)
+ * sub-limit, which appears later in the same panel.
+ */
+function firstCupoField(text: string, keyword: string): string | undefined {
+  const match = text.match(new RegExp(`${keyword}[^\\d$]*\\$?\\s*([\\d.,]+)`, "i"));
+  return match?.[1];
+}
+
+export interface BciCupoReading {
+  label: string;
+  nationalText: string;
+  internationalText: string;
+}
+
+/** Last-4 digits of a card label (`(\d{4})(?!.*\d)`), the idiom routeBciCardMovements uses. */
+function cardLast4(label: string): string | undefined {
+  return label.match(/(\d{4})(?!.*\d)/)?.[1];
+}
+
+/**
+ * Pure seam for BCI per-card cupo: bind each raw panel reading to its card and
+ * assign that card its own national / international cupo.
+ *
+ * - Parsing: national via parseClp (integer pesos), international via parseUsd
+ *   (float dollars, comma decimals).
+ * - Field extraction: first total / utilizado / disponible match per panel — the
+ *   regular cupo, not the Avances sub-limit.
+ * - Binding: by last-4 of the label, falling back to exact-label match; reading
+ *   order is irrelevant.
+ * - Guards: national assigned only when its total > 0, international only when its
+ *   total > 0. A card with no matching reading (or a total-0 read) is left with
+ *   national/international undefined — never zeros, never another card's values.
+ */
+export function assignBciCupos(
+  creditCards: CreditCardBalance[],
+  readings: BciCupoReading[],
+): CreditCardBalance[] {
+  return creditCards.map((card) => {
+    const last4 = cardLast4(card.label);
+    const reading =
+      (last4 ? readings.find((r) => cardLast4(r.label) === last4) : undefined) ??
+      readings.find((r) => r.label === card.label);
+    if (!reading) return { ...card };
+
+    const result: CreditCardBalance = { ...card };
+
+    const nationalTotal = parseClp(firstCupoField(reading.nationalText, "total") ?? "");
+    if (nationalTotal > 0) {
+      result.national = {
+        used: parseClp(firstCupoField(reading.nationalText, "utilizado") ?? ""),
+        available: parseClp(firstCupoField(reading.nationalText, "disponible") ?? ""),
+        total: nationalTotal,
+      };
+    }
+
+    const internationalTotal = parseUsd(firstCupoField(reading.internationalText, "total") ?? "");
+    if (internationalTotal > 0) {
+      result.international = {
+        used: parseUsd(firstCupoField(reading.internationalText, "utilizado") ?? ""),
+        available: parseUsd(firstCupoField(reading.internationalText, "disponible") ?? ""),
+        total: internationalTotal,
+        currency: "USD",
+      };
+    }
+
+    return result;
+  });
+}
+
 export function assembleBciResult(
   balance: number | undefined,
   accountMovements: BankMovement[],
@@ -579,23 +668,31 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
         const cupoFrame = await waitForFrame(page, IFRAME_PATTERNS.tcCupo, 15000);
         if (cupoFrame) {
           await delay(3000);
-          const cupoData = await cupoFrame.evaluate(() => {
-            const bodyText = document.body?.innerText || "";
-            const parseAmt = (t: string) => parseInt(t.replace(/[^0-9]/g, ""), 10) || 0;
-            const natUsed = bodyText.match(/utilizado\s*(?:nacional)?\s*\$?\s*([\d.]+)/i);
-            const natAvail = bodyText.match(/disponible\s*(?:nacional)?\s*\$?\s*([\d.]+)/i);
-            const natTotal = bodyText.match(/total\s*(?:nacional)?\s*\$?\s*([\d.]+)/i);
-            const intUsed = bodyText.match(/utilizado\s*(?:internacional)?\s*USD?\s*\$?\s*([\d.,]+)/i);
-            const intAvail = bodyText.match(/disponible\s*(?:internacional)?\s*USD?\s*\$?\s*([\d.,]+)/i);
-            const intTotal = bodyText.match(/total\s*(?:internacional)?\s*USD?\s*\$?\s*([\d.,]+)/i);
-            return { nationalUsed: natUsed ? parseAmt(natUsed[1]) : 0, nationalAvailable: natAvail ? parseAmt(natAvail[1]) : 0, nationalTotal: natTotal ? parseAmt(natTotal[1]) : 0, internationalUsed: intUsed ? parseAmt(intUsed[1]) : 0, internationalAvailable: intAvail ? parseAmt(intAvail[1]) : 0, internationalTotal: intTotal ? parseAmt(intTotal[1]) : 0 };
+          // Read the currently-displayed (default) card only: one raw reading of
+          // the two cupo panels, tagged with the selected dropdown label so
+          // assignBciCupos can bind it to its card. Dropdown switching for the
+          // remaining cards is a separate step, not done here.
+          const reading = await cupoFrame.evaluate(() => {
+            const select =
+              (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
+              (Array.from(document.querySelectorAll("select")).find((s) =>
+                Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
+              ) ?? null);
+            const label =
+              select?.options[select.selectedIndex]?.textContent?.trim() ||
+              select?.options[0]?.textContent?.trim() ||
+              "";
+            const panelText = (id: string) => {
+              const el = document.getElementById(id) as HTMLElement | null;
+              return el?.innerText ?? "";
+            };
+            const nationalText = panelText("tarjetasGeneral:saldosNac") || (document.body?.innerText || "");
+            const internationalText =
+              panelText("tarjetasGeneral:infoSaldosInternacional") || (document.body?.innerText || "");
+            return { label, nationalText, internationalText };
           });
-          // NOTE: the cupo page is read once, so the same balance is applied to
-          // every card. Per-card cupo navigation is a known remaining gap.
-          for (const card of creditCards) {
-            card.national = { used: cupoData.nationalUsed, available: cupoData.nationalAvailable, total: cupoData.nationalTotal };
-            if (cupoData.internationalTotal > 0) card.international = { used: cupoData.internationalUsed, available: cupoData.internationalAvailable, total: cupoData.internationalTotal, currency: "USD" };
-          }
+          debugLog.push(`  Cupo: displayed card "${reading.label}"`);
+          creditCards = assignBciCupos(creditCards, [reading]);
         }
       }
     }

@@ -469,6 +469,25 @@ export interface BciCupoReading {
   internationalText: string;
 }
 
+/**
+ * Parse one cupo panel's text into a `{ used, available, total }` reading with
+ * the given amount parser (parseClp for national, parseUsd for international).
+ * Returns undefined when the total is 0 or unreadable, so the caller leaves that
+ * cupo unset rather than emitting zeros.
+ */
+function parseCupoPanel(
+  text: string,
+  parseAmount: (t: string) => number,
+): { used: number; available: number; total: number } | undefined {
+  const total = parseAmount(firstCupoField(text, "total") ?? "");
+  if (total <= 0) return undefined;
+  return {
+    used: parseAmount(firstCupoField(text, "utilizado") ?? ""),
+    available: parseAmount(firstCupoField(text, "disponible") ?? ""),
+    total,
+  };
+}
+
 /** Last-4 digits of a card label (`(\d{4})(?!.*\d)`), the idiom routeBciCardMovements uses. */
 function cardLast4(label: string): string | undefined {
   return label.match(/(\d{4})(?!.*\d)/)?.[1];
@@ -501,24 +520,11 @@ export function assignBciCupos(
 
     const result: CreditCardBalance = { ...card };
 
-    const nationalTotal = parseClp(firstCupoField(reading.nationalText, "total") ?? "");
-    if (nationalTotal > 0) {
-      result.national = {
-        used: parseClp(firstCupoField(reading.nationalText, "utilizado") ?? ""),
-        available: parseClp(firstCupoField(reading.nationalText, "disponible") ?? ""),
-        total: nationalTotal,
-      };
-    }
+    const national = parseCupoPanel(reading.nationalText, parseClp);
+    if (national) result.national = national;
 
-    const internationalTotal = parseUsd(firstCupoField(reading.internationalText, "total") ?? "");
-    if (internationalTotal > 0) {
-      result.international = {
-        used: parseUsd(firstCupoField(reading.internationalText, "utilizado") ?? ""),
-        available: parseUsd(firstCupoField(reading.internationalText, "disponible") ?? ""),
-        total: internationalTotal,
-        currency: "USD",
-      };
-    }
+    const international = parseCupoPanel(reading.internationalText, parseUsd);
+    if (international) result.international = { ...international, currency: "USD" };
 
     return result;
   });

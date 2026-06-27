@@ -387,6 +387,27 @@ async function waitForTableChange(
   return false;
 }
 
+// ─── Result assembly ─────────────────────────────────────────────
+
+/**
+ * Build the final BCI scrape result from already-separated inputs.
+ *
+ * Account movements and per-card movements live in distinct buckets: credit-card
+ * transactions must never leak into the checking account. (Previously every card
+ * movement was pushed onto the single account, leaving the cards themselves empty.)
+ */
+export function assembleBciResult(
+  balance: number | undefined,
+  accountMovements: BankMovement[],
+  creditCards: CreditCardBalance[],
+): { accounts: AccountBalance[]; creditCards: CreditCardBalance[] | undefined } {
+  const accounts: AccountBalance[] = [
+    { balance, movements: deduplicateMovements(accountMovements) },
+  ];
+  const cards = creditCards.map((c) => ({ ...c, movements: deduplicateMovements(c.movements ?? []) }));
+  return { accounts, creditCards: cards.length > 0 ? cards : undefined };
+}
+
 // ─── Main scrape function ────────────────────────────────────────
 
 async function scrapeBci(session: BrowserSession, options: ScraperOptions): Promise<ScrapeResult> {
@@ -414,7 +435,7 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
   // Account movements
   progress("Extrayendo movimientos de cuenta...");
   debugLog.push("5. Fetching account movements...");
-  const allMovements: BankMovement[] = [];
+  const accountMovements: BankMovement[] = [];
   let balance: number | undefined;
 
   if (await clickByTitle(page, "Últimos Movimientos")) {
@@ -429,7 +450,7 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
         const apiMovements = normalizeBciApiMovements(captured);
         debugLog.push(`  Checking API movements: ${apiMovements.length}`);
         if (apiMovements.length > 0) {
-          allMovements.push(...apiMovements);
+          accountMovements.push(...apiMovements);
           // Still extract balance from the iframe DOM
           balance = await movFrame.evaluate(() => {
             const el = document.querySelector("#saldoDis + div, .bci-h2-w800");
@@ -441,7 +462,7 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
         }
       }
 
-      if (allMovements.length === 0) {
+      if (accountMovements.length === 0) {
         debugLog.push("  Checking API: no data, falling back to HTML extraction");
         const accounts = await movFrame.evaluate((sel: string) => {
           const select = document.querySelector(sel) as HTMLSelectElement | null;
@@ -471,31 +492,53 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
           }
           const movements = await extractMovementsFromFrame(movFrame, debugLog);
           const prefixed = accounts.length > 1 ? movements.map(m => ({ ...m, description: `[${accounts[i].label}] ${m.description}`.trim() })) : movements;
-          allMovements.push(...prefixed);
+          accountMovements.push(...prefixed);
         }
       }
     }
   }
 
-  // Credit cards
+  // Credit cards — each card's movements are kept separate from the checking
+  // account and from each other. BCI's "Mis movimientos" table shows one card at
+  // a time, keyed by the select.tdc dropdown, so we iterate it per card,
+  // mirroring the account-select loop above.
   progress("Extrayendo datos de tarjeta de crédito...");
   debugLog.push("6. Navigating to credit cards...");
   const creditCards: CreditCardBalance[] = [];
   if (await clickByTitle(page, "Tarjetas")) {
     await delay(3000);
-    const cardLabels = await page.evaluate(() => {
+    const cardOptions = await page.evaluate(() => {
       const selects = document.querySelectorAll("select.tdc");
       if (selects.length === 0) return [];
-      return Array.from((selects[0] as HTMLSelectElement).options).map((o) => o.textContent?.trim() || "");
+      return Array.from((selects[0] as HTMLSelectElement).options).map((o) => ({ value: o.value, label: o.textContent?.trim() || "" }));
     });
+    // One entry per card up front, so a card still surfaces even when its
+    // movement extraction yields nothing.
+    for (const opt of cardOptions) creditCards.push({ label: opt.label, movements: [] });
 
-    if (cardLabels.length > 0 && await clickByTitle(page, "Mis movimientos")) {
+    if (cardOptions.length > 0 && await clickByTitle(page, "Mis movimientos")) {
       const tcFrame = await waitForFrame(page, IFRAME_PATTERNS.tcMovements, 15000);
       if (tcFrame) {
         await delay(3000);
-        for (const { tab, billingType, source } of TC_COMBINATIONS) {
-          const movements = await extractTCMovements(tcFrame, tab, billingType, source, debugLog);
-          allMovements.push(...movements);
+        for (let i = 0; i < cardOptions.length; i++) {
+          // Switch the card selector for every card after the first.
+          if (i > 0) {
+            await page.evaluate((value: string) => {
+              const select = document.querySelector("select.tdc") as HTMLSelectElement | null;
+              if (!select) return;
+              select.value = value;
+              select.dispatchEvent(new Event("change", { bubbles: true }));
+            }, cardOptions[i].value);
+            await delay(3000);
+          }
+          const cardMovements: BankMovement[] = [];
+          for (const { tab, billingType, source } of TC_COMBINATIONS) {
+            const movements = await extractTCMovements(tcFrame, tab, billingType, source, debugLog);
+            cardMovements.push(...movements);
+          }
+          const deduped = deduplicateMovements(cardMovements);
+          creditCards[i].movements = deduped;
+          debugLog.push(`  Card "${cardOptions[i].label}": ${deduped.length} movements`);
         }
       }
 
@@ -514,24 +557,25 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
             const intTotal = bodyText.match(/total\s*(?:internacional)?\s*USD?\s*\$?\s*([\d.,]+)/i);
             return { nationalUsed: natUsed ? parseAmt(natUsed[1]) : 0, nationalAvailable: natAvail ? parseAmt(natAvail[1]) : 0, nationalTotal: natTotal ? parseAmt(natTotal[1]) : 0, internationalUsed: intUsed ? parseAmt(intUsed[1]) : 0, internationalAvailable: intAvail ? parseAmt(intAvail[1]) : 0, internationalTotal: intTotal ? parseAmt(intTotal[1]) : 0 };
           });
-          for (const label of cardLabels) {
-            const card: CreditCardBalance = { label, national: { used: cupoData.nationalUsed, available: cupoData.nationalAvailable, total: cupoData.nationalTotal }, movements: [] };
+          // NOTE: the cupo page is read once, so the same balance is applied to
+          // every card. Per-card cupo navigation is a known remaining gap.
+          for (const card of creditCards) {
+            card.national = { used: cupoData.nationalUsed, available: cupoData.nationalAvailable, total: cupoData.nationalTotal };
             if (cupoData.internationalTotal > 0) card.international = { used: cupoData.internationalUsed, available: cupoData.internationalAvailable, total: cupoData.internationalTotal, currency: "USD" };
-            creditCards.push(card);
           }
         }
       }
     }
   }
 
-  const deduplicated = deduplicateMovements(allMovements);
-  debugLog.push(`  Total: ${deduplicated.length} unique movements`);
-  progress(`Listo — ${deduplicated.length} movimientos totales`);
+  const totalCardMovements = creditCards.reduce((s, c) => s + (c.movements?.length ?? 0), 0);
+  debugLog.push(`  Total: ${accountMovements.length} account + ${totalCardMovements} card movements`);
+  progress(`Listo — ${accountMovements.length + totalCardMovements} movimientos totales`);
   await doSave(page, "06-final");
   const ss = doScreenshots ? (await page.screenshot({ encoding: "base64" })) as string : undefined;
 
-  const accounts: AccountBalance[] = [{ balance, movements: deduplicated }];
-  return { success: true, bank, accounts, creditCards: creditCards.length > 0 ? creditCards : undefined, screenshot: ss, debug: debugLog.join("\n") };
+  const { accounts, creditCards: cards } = assembleBciResult(balance, accountMovements, creditCards);
+  return { success: true, bank, accounts, creditCards: cards, screenshot: ss, debug: debugLog.join("\n") };
 }
 
 // ─── Export ──────────────────────────────────────────────────────

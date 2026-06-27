@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { MOVEMENT_SOURCE } from "../types.js";
-import { normalizeBciApiMovements } from "./bci.js";
+import type { BankMovement, CreditCardBalance } from "../types.js";
+import { normalizeBciApiMovements, assembleBciResult } from "./bci.js";
 
 describe("normalizeBciApiMovements", () => {
   it("returns empty array for empty captures", () => {
@@ -88,5 +89,51 @@ describe("normalizeBciApiMovements", () => {
     const result = normalizeBciApiMovements([makeCapture("A"), makeCapture("B")]);
     expect(result).toHaveLength(2);
     expect(result.map((m) => m.description)).toEqual(["A", "B"]);
+  });
+});
+
+describe("assembleBciResult", () => {
+  const acct = (description: string): BankMovement => ({
+    date: "01-06-2026", description, amount: -1000, balance: 0, source: MOVEMENT_SOURCE.account,
+  });
+  const cardTx = (description: string): BankMovement => ({
+    date: "01-06-2026", description, amount: -2000, balance: 0, source: MOVEMENT_SOURCE.credit_card_billed,
+  });
+
+  it("keeps credit-card movements out of the checking account", () => {
+    const accountMovements = [acct("Giro cajero automatico")];
+    const creditCards: CreditCardBalance[] = [
+      { label: "bciplus visa gold - 0043", movements: [cardTx("DECATHLON VINA"), cardTx("MUBI.COM MUBI")] },
+    ];
+
+    const { accounts, creditCards: out } = assembleBciResult(454969, accountMovements, creditCards);
+
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0].balance).toBe(454969);
+    expect(accounts[0].movements.map((m) => m.description)).toEqual(["Giro cajero automatico"]);
+    // The original bug dumped every card transaction onto the account.
+    expect(accounts[0].movements.some((m) => m.source !== MOVEMENT_SOURCE.account)).toBe(false);
+
+    expect(out).toHaveLength(1);
+    expect(out![0].movements.map((m) => m.description)).toEqual(["DECATHLON VINA", "MUBI.COM MUBI"]);
+  });
+
+  it("routes each card's movements to its own entry", () => {
+    const creditCards: CreditCardBalance[] = [
+      { label: "bciplus visa gold - 0043", movements: [cardTx("VISA PURCHASE")] },
+      { label: "bciplus mastercard gold - 3725", movements: [cardTx("MASTERCARD PURCHASE")] },
+    ];
+
+    const { creditCards: out } = assembleBciResult(0, [], creditCards);
+
+    expect(out).toHaveLength(2);
+    expect(out![0].movements.map((m) => m.description)).toEqual(["VISA PURCHASE"]);
+    expect(out![1].movements.map((m) => m.description)).toEqual(["MASTERCARD PURCHASE"]);
+  });
+
+  it("returns undefined creditCards when there are none", () => {
+    const { accounts, creditCards: out } = assembleBciResult(0, [acct("x")], []);
+    expect(accounts[0].movements).toHaveLength(1);
+    expect(out).toBeUndefined();
   });
 });

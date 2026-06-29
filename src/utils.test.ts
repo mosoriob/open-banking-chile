@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { DebugLog, deduplicateMovements } from "./utils.js";
+import { DebugLog, deduplicateMovements, normalizeDate } from "./utils.js";
 import { MOVEMENT_SOURCE } from "./types.js";
 import type { BankMovement } from "./types.js";
 
@@ -46,6 +46,26 @@ describe("DebugLog", () => {
     log.push("step 1");
     log.push("step 2");
     expect(log.join("\n")).toBe("step 1\nstep 2");
+  });
+});
+
+// ─── normalizeDate ───────────────────────────────────────────────
+
+describe("normalizeDate", () => {
+  it("converts ISO yyyy-mm-dd to dd-mm-yyyy (BCI checking API source)", () => {
+    // The BCI checking-account API returns ISO dates; every other source
+    // scrapes dd/mm/yyyy. Without this branch, ISO passed through unchanged
+    // and consumers reading [day, month, year] = date.split("-") got 1906.
+    expect(normalizeDate("2026-06-29")).toBe("29-06-2026");
+  });
+
+  it("still normalizes scraped dd/mm/yyyy (credit-card source)", () => {
+    expect(normalizeDate("29/06/2026")).toBe("29-06-2026");
+  });
+
+  it("leaves an already-normalized dd-mm-yyyy date unchanged", () => {
+    // ISO branch must not hijack dd-mm-yyyy: the year is last here, not first.
+    expect(normalizeDate("29-06-2026")).toBe("29-06-2026");
   });
 });
 

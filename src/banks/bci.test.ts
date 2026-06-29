@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { MOVEMENT_SOURCE } from "../types.js";
 import type { BankMovement, CreditCardBalance } from "../types.js";
-import { normalizeBciApiMovements, assembleBciResult, routeBciCardMovements, assignBciCupos, planCupoReads } from "./bci.js";
+import { normalizeBciApiMovements, assembleBciResult, routeBciCardMovements, assignBciCupos, planCupoReads, tabCurrency } from "./bci.js";
 
 describe("normalizeBciApiMovements", () => {
   it("returns empty array for empty captures", () => {
@@ -135,6 +135,21 @@ describe("assembleBciResult", () => {
     const { accounts, creditCards: out } = assembleBciResult(0, [acct("x")], []);
     expect(accounts[0].movements).toHaveLength(1);
     expect(out).toBeUndefined();
+  });
+});
+
+describe("tabCurrency", () => {
+  it("marks the Internacional USD tab as USD", () => {
+    expect(tabCurrency("Internacional USD")).toBe("USD");
+  });
+
+  it("leaves the Nacional $ tab as CLP (undefined)", () => {
+    expect(tabCurrency("Nacional $")).toBeUndefined();
+  });
+
+  it("treats any other/unknown tab as CLP (undefined)", () => {
+    expect(tabCurrency("")).toBeUndefined();
+    expect(tabCurrency("Otra")).toBeUndefined();
   });
 });
 

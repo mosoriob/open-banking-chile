@@ -35,6 +35,12 @@ export interface BankMovement {
   installments?: string;
   /** Monto total de la compra (distinto de amount cuando es en cuotas) */
   totalAmount?: number;
+  /**
+   * Moneda del movimiento. Ausente = CLP (pesos). "USD" para los cargos de la
+   * pestaña "Internacional USD" de la tarjeta de crédito BCI, que se facturan
+   * en dólares y no deben tratarse como pesos.
+   */
+  currency?: "USD";
 }
 
 /** Saldo y movimientos de una cuenta bancaria */

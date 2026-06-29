@@ -66,6 +66,15 @@ const TC_COMBINATIONS = [
   { tab: "Internacional USD", billingType: "Facturados", source: MOVEMENT_SOURCE.credit_card_billed },
 ];
 
+/**
+ * Moneda de los movimientos de una pestaña de la tarjeta de crédito BCI. La
+ * pestaña "Internacional USD" factura en dólares; cualquier otra ("Nacional $")
+ * es en pesos, que se representa con `undefined` (ausente = CLP).
+ */
+export function tabCurrency(tab: string): "USD" | undefined {
+  return tab === "Internacional USD" ? "USD" : undefined;
+}
+
 const NEXT_PAGE_TEXTS = ["navigate_next", "siguiente"];
 const ACCOUNT_SELECT = "bci-wk-select#cuenta select, select";
 
@@ -329,6 +338,7 @@ async function extractTCMovements(
         balance: 0,
         source,
         card: r.cardType || undefined,
+        currency: tabCurrency(tab),
       });
     }
 

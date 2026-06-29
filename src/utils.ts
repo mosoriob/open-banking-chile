@@ -137,6 +137,16 @@ export function parseChileanAmount(text: string): number {
 export function normalizeDate(raw: string): string {
   const value = raw.trim();
 
+  // ISO yyyy-mm-dd (fuente: APIs JSON como la cuenta corriente BCI). Se
+  // detecta antes que dd/mm/yyyy porque el año de 4 dígitos va primero.
+  const isoMatch = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (isoMatch) {
+    const year = isoMatch[1];
+    const month = isoMatch[2].padStart(2, "0");
+    const day = isoMatch[3].padStart(2, "0");
+    return `${day}-${month}-${year}`;
+  }
+
   // dd/mm/yyyy, dd.mm.yyyy, dd-mm-yyyy (con año 2 o 4 dígitos)
   const fullMatch = value.match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})$/);
   if (fullMatch) {

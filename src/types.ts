@@ -23,6 +23,8 @@ export interface BankMovement {
   description: string;
   /** Monto: positivo = abono (depósito), negativo = cargo (gasto) */
   amount: number;
+  /** Moneda del monto. Ausente = CLP. "USD" en compras de la pestaña internacional. */
+  currency?: "CLP" | "USD";
   /** Saldo después del movimiento */
   balance: number;
   /** Origen: cuenta corriente, TC no facturada, TC facturada */

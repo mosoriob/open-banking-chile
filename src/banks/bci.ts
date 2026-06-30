@@ -1,7 +1,21 @@
 import type { Page, Frame } from "puppeteer-core";
-import type { AccountBalance, BankMovement, BankScraper, CreditCardBalance, ScrapeResult, ScraperOptions } from "../types.js";
+import type {
+  AccountBalance,
+  BankMovement,
+  BankScraper,
+  CreditCardBalance,
+  ScrapeResult,
+  ScraperOptions,
+} from "../types.js";
 import { MOVEMENT_SOURCE, type MovementSource } from "../types.js";
-import { closePopups, delay, formatRut, parseChileanAmount, normalizeDate, deduplicateMovements } from "../utils.js";
+import {
+  closePopups,
+  delay,
+  formatRut,
+  parseChileanAmount,
+  normalizeDate,
+  deduplicateMovements,
+} from "../utils.js";
 import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
 import { detect2FA, waitFor2FA } from "../actions/two-factor.js";
@@ -55,15 +69,37 @@ const IFRAME_PATTERNS = {
 } as const;
 
 const TWO_FACTOR_CONFIG = {
-  keywords: ["bci pass", "segundo factor", "aprobación en tu app", "autorizar en tu app", "confirmar en tu app"],
+  keywords: [
+    "bci pass",
+    "segundo factor",
+    "aprobación en tu app",
+    "autorizar en tu app",
+    "confirmar en tu app",
+  ],
   timeoutEnvVar: "BCI_2FA_TIMEOUT_SEC",
 };
 
 const TC_COMBINATIONS = [
-  { tab: "Nacional $", billingType: "No facturados", source: MOVEMENT_SOURCE.credit_card_unbilled },
-  { tab: "Nacional $", billingType: "Facturados", source: MOVEMENT_SOURCE.credit_card_billed },
-  { tab: "Internacional USD", billingType: "No facturados", source: MOVEMENT_SOURCE.credit_card_unbilled },
-  { tab: "Internacional USD", billingType: "Facturados", source: MOVEMENT_SOURCE.credit_card_billed },
+  {
+    tab: "Nacional $",
+    billingType: "No facturados",
+    source: MOVEMENT_SOURCE.credit_card_unbilled,
+  },
+  {
+    tab: "Nacional $",
+    billingType: "Facturados",
+    source: MOVEMENT_SOURCE.credit_card_billed,
+  },
+  {
+    tab: "Internacional USD",
+    billingType: "No facturados",
+    source: MOVEMENT_SOURCE.credit_card_unbilled,
+  },
+  {
+    tab: "Internacional USD",
+    billingType: "Facturados",
+    source: MOVEMENT_SOURCE.credit_card_billed,
+  },
 ];
 
 /**
@@ -82,13 +118,22 @@ const ACCOUNT_SELECT = "bci-wk-select#cuenta select, select";
 
 async function clickByTitle(page: Page, title: string): Promise<boolean> {
   return page.evaluate((t: string) => {
-    const link = document.querySelector(`a[title="${t}"]`) as HTMLElement | null;
-    if (link) { link.click(); return true; }
+    const link = document.querySelector(
+      `a[title="${t}"]`,
+    ) as HTMLElement | null;
+    if (link) {
+      link.click();
+      return true;
+    }
     return false;
   }, title);
 }
 
-async function waitForFrame(page: Page, urlPattern: string, timeoutMs = 10000): Promise<Frame | null> {
+async function waitForFrame(
+  page: Page,
+  urlPattern: string,
+  timeoutMs = 10000,
+): Promise<Frame | null> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const frame = page.frames().find((f) => f.url().includes(urlPattern));
@@ -99,7 +144,10 @@ async function waitForFrame(page: Page, urlPattern: string, timeoutMs = 10000): 
 }
 
 async function bciLogin(
-  page: Page, rut: string, password: string, debugLog: string[],
+  page: Page,
+  rut: string,
+  password: string,
+  debugLog: string[],
   doSave: (page: Page, name: string) => Promise<void>,
 ): Promise<{ success: boolean; error?: string; screenshot?: string }> {
   debugLog.push("1. Navigating to BCI login...");
@@ -111,22 +159,37 @@ async function bciLogin(
   const cleanRut = rut.replace(/[.\-\s]/g, "");
   const rutBody = cleanRut.slice(0, -1);
   const rutDv = cleanRut.slice(-1);
-  const filled = await page.evaluate((formatted: string, body: string, dv: string) => {
-    const rutAux = document.getElementById("rut_aux") as HTMLInputElement | null;
-    const rutHidden = document.getElementById("rut") as HTMLInputElement | null;
-    const digHidden = document.getElementById("dig") as HTMLInputElement | null;
-    if (!rutAux) return false;
-    rutAux.value = formatted;
-    rutAux.dispatchEvent(new Event("input", { bubbles: true }));
-    rutAux.dispatchEvent(new Event("change", { bubbles: true }));
-    rutAux.dispatchEvent(new Event("blur", { bubbles: true }));
-    if (rutHidden) rutHidden.value = body;
-    if (digHidden) digHidden.value = dv;
-    return true;
-  }, formatRut(rut), rutBody, rutDv);
+  const filled = await page.evaluate(
+    (formatted: string, body: string, dv: string) => {
+      const rutAux = document.getElementById(
+        "rut_aux",
+      ) as HTMLInputElement | null;
+      const rutHidden = document.getElementById(
+        "rut",
+      ) as HTMLInputElement | null;
+      const digHidden = document.getElementById(
+        "dig",
+      ) as HTMLInputElement | null;
+      if (!rutAux) return false;
+      rutAux.value = formatted;
+      rutAux.dispatchEvent(new Event("input", { bubbles: true }));
+      rutAux.dispatchEvent(new Event("change", { bubbles: true }));
+      rutAux.dispatchEvent(new Event("blur", { bubbles: true }));
+      if (rutHidden) rutHidden.value = body;
+      if (digHidden) digHidden.value = dv;
+      return true;
+    },
+    formatRut(rut),
+    rutBody,
+    rutDv,
+  );
   if (!filled) {
     const ss = await page.screenshot({ encoding: "base64" });
-    return { success: false, error: "Campo de RUT no encontrado.", screenshot: ss as string };
+    return {
+      success: false,
+      error: "Campo de RUT no encontrado.",
+      screenshot: ss as string,
+    };
   }
 
   debugLog.push("  Filling password...");
@@ -140,19 +203,29 @@ async function bciLogin(
   }, password);
   if (!passFilled) {
     const ss = await page.screenshot({ encoding: "base64" });
-    return { success: false, error: "Campo de clave no encontrado.", screenshot: ss as string };
+    return {
+      success: false,
+      error: "Campo de clave no encontrado.",
+      screenshot: ss as string,
+    };
   }
 
   await delay(500);
   debugLog.push("3. Submitting login...");
   await page.evaluate(() => {
-    const btn = document.querySelector('button[type="submit"]') as HTMLButtonElement | null;
+    const btn = document.querySelector(
+      'button[type="submit"]',
+    ) as HTMLButtonElement | null;
     if (btn) btn.disabled = false;
     const form = document.getElementById("frm") as HTMLFormElement | null;
     if (form) form.submit();
     else if (btn) btn.click();
   });
-  try { await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }); } catch { /* SPA */ }
+  try {
+    await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 });
+  } catch {
+    /* SPA */
+  }
   await delay(3000);
   await doSave(page, "03-post-login");
 
@@ -162,7 +235,11 @@ async function bciLogin(
     const approved = await waitFor2FA(page, debugLog, TWO_FACTOR_CONFIG);
     if (!approved) {
       const ss = await page.screenshot({ encoding: "base64" });
-      return { success: false, error: "Timeout esperando BCI Pass.", screenshot: ss as string };
+      return {
+        success: false,
+        error: "Timeout esperando BCI Pass.",
+        screenshot: ss as string,
+      };
     }
     await delay(3000);
   }
@@ -170,22 +247,36 @@ async function bciLogin(
   const loginError = await detectLoginError(page);
   if (loginError) {
     const ss = await page.screenshot({ encoding: "base64" });
-    return { success: false, error: `Error del banco: ${loginError}`, screenshot: ss as string };
+    return {
+      success: false,
+      error: `Error del banco: ${loginError}`,
+      screenshot: ss as string,
+    };
   }
 
   if (page.url().includes("banco-en-linea/personas")) {
     const ss = await page.screenshot({ encoding: "base64" });
-    return { success: false, error: "Login no navegó fuera de la página.", screenshot: ss as string };
+    return {
+      success: false,
+      error: "Login no navegó fuera de la página.",
+      screenshot: ss as string,
+    };
   }
 
   debugLog.push("4. Login OK!");
   return { success: true };
 }
 
-async function extractMovementsFromFrame(frame: Frame, debugLog: string[]): Promise<BankMovement[]> {
+async function extractMovementsFromFrame(
+  frame: Frame,
+  debugLog: string[],
+): Promise<BankMovement[]> {
   await frame.evaluate(() => {
     for (const opt of document.querySelectorAll("a, button, span, option")) {
-      if ((opt as HTMLElement).innerText?.trim() === "50") { (opt as HTMLElement).click(); return; }
+      if ((opt as HTMLElement).innerText?.trim() === "50") {
+        (opt as HTMLElement).click();
+        return;
+      }
     }
   });
   await delay(3000);
@@ -193,13 +284,25 @@ async function extractMovementsFromFrame(frame: Frame, debugLog: string[]): Prom
   const all: BankMovement[] = [];
   for (let pageIndex = 0; pageIndex < 25; pageIndex++) {
     const raw = await frame.evaluate(() => {
-      const results: Array<{ date: string; description: string; cargo: string; abono: string }> = [];
-      for (const row of Array.from(document.querySelectorAll("table tbody tr"))) {
+      const results: Array<{
+        date: string;
+        description: string;
+        cargo: string;
+        abono: string;
+      }> = [];
+      for (const row of Array.from(
+        document.querySelectorAll("table tbody tr"),
+      )) {
         const cells = Array.from(row.querySelectorAll("td"));
         if (cells.length < 4) continue;
         const date = cells[0].textContent?.trim() || "";
         if (!/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(date)) continue;
-        results.push({ date, description: cells[1].textContent?.trim() || "", cargo: cells[2].textContent?.trim() || "", abono: cells[3].textContent?.trim() || "" });
+        results.push({
+          date,
+          description: cells[1].textContent?.trim() || "",
+          cargo: cells[2].textContent?.trim() || "",
+          abono: cells[3].textContent?.trim() || "",
+        });
       }
       return results;
     });
@@ -208,21 +311,35 @@ async function extractMovementsFromFrame(frame: Frame, debugLog: string[]): Prom
       const abonoAmount = r.abono ? parseChileanAmount(r.abono) : 0;
       const amount = cargoAmount > 0 ? -cargoAmount : abonoAmount;
       if (amount === 0) continue;
-      all.push({ date: normalizeDate(r.date), description: r.description, amount, balance: 0, source: MOVEMENT_SOURCE.account });
+      all.push({
+        date: normalizeDate(r.date),
+        description: r.description,
+        amount,
+        balance: 0,
+        source: MOVEMENT_SOURCE.account,
+      });
     }
     debugLog.push(`  Page ${pageIndex + 1}: ${raw.length} raw movements`);
 
-    const hasNext = await frame.evaluate((nextTexts: string[]) => {
-      for (const btn of document.querySelectorAll("button, a")) {
-        const text = (btn as HTMLElement).innerText?.trim().toLowerCase() || "";
-        if (nextTexts.some((t) => text === t || text.includes(t))) {
-          if ((btn as HTMLButtonElement).disabled || btn.getAttribute("aria-disabled") === "true") return false;
-          (btn as HTMLElement).click();
-          return true;
+    const hasNext = await frame.evaluate(
+      (nextTexts: string[]) => {
+        for (const btn of document.querySelectorAll("button, a")) {
+          const text =
+            (btn as HTMLElement).innerText?.trim().toLowerCase() || "";
+          if (nextTexts.some((t) => text === t || text.includes(t))) {
+            if (
+              (btn as HTMLButtonElement).disabled ||
+              btn.getAttribute("aria-disabled") === "true"
+            )
+              return false;
+            (btn as HTMLElement).click();
+            return true;
+          }
         }
-      }
-      return false;
-    }, [...NEXT_PAGE_TEXTS]);
+        return false;
+      },
+      [...NEXT_PAGE_TEXTS],
+    );
     if (!hasNext) break;
     await delay(3000);
   }
@@ -230,6 +347,44 @@ async function extractMovementsFromFrame(frame: Frame, debugLog: string[]): Prom
 }
 
 // ─── extractTCMovements — versión corregida ──────────────────────────────────
+/** A credit-card row scraped from the movements table, before parsing. */
+type TcRawRow = {
+  date: string;
+  description: string;
+  cardType: string;
+  rawAmount: string;
+  isCargo: boolean;
+};
+
+/**
+ * Parse scraped credit-card rows into BankMovements, tagging the amount's
+ * currency. The "Internacional USD" tab charges in dollars, so its rows must
+ * carry `currency: "USD"` — otherwise a USD 119,00 charge is indistinguishable
+ * from a CLP 119 one downstream. CLP is the implicit default (currency omitted).
+ */
+export function buildTcMovements(
+  rawRows: TcRawRow[],
+  source: MovementSource,
+  currency: "CLP" | "USD",
+): BankMovement[] {
+  const movements: BankMovement[] = [];
+  for (const r of rawRows) {
+    const absAmount = parseChileanAmount(r.rawAmount);
+    if (absAmount === 0) continue;
+
+    movements.push({
+      date: normalizeDate(r.date),
+      description: r.description,
+      amount: r.isCargo ? -absAmount : absAmount,
+      balance: 0,
+      source,
+      card: r.cardType || undefined,
+      ...(currency === "USD" ? { currency } : {}),
+    });
+  }
+  return movements;
+}
+
 async function extractTCMovements(
   frame: Frame,
   tab: string,
@@ -237,13 +392,17 @@ async function extractTCMovements(
   source: MovementSource,
   debugLog: string[],
 ): Promise<BankMovement[]> {
-
   // ── FASE 1: Seleccionar pestaña (Nacional $ / Internacional USD) ────────────
   await frame.evaluate((tabName: string) => {
-    for (const el of document.querySelectorAll(".listTab span, .bci-wk-tab span, .listTab a span")) {
+    for (const el of document.querySelectorAll(
+      ".listTab span, .bci-wk-tab span, .listTab a span",
+    )) {
       if ((el as HTMLElement).textContent?.trim() === tabName) {
         const anchor = el.closest("a") as HTMLElement | null;
-        if (anchor) { anchor.click(); return; }
+        if (anchor) {
+          anchor.click();
+          return;
+        }
       }
     }
   }, tab);
@@ -251,7 +410,9 @@ async function extractTCMovements(
 
   // ── FASE 2: Seleccionar tipo de facturación ─────────────────────────────────
   await frame.evaluate((btnText: string) => {
-    for (const btn of document.querySelectorAll("button.btn_blue_border, button")) {
+    for (const btn of document.querySelectorAll(
+      "button.btn_blue_border, button",
+    )) {
       if ((btn as HTMLElement).textContent?.trim() === btnText) {
         (btn as HTMLElement).click();
         return;
@@ -263,7 +424,9 @@ async function extractTCMovements(
   // ── Verificar si hay movimientos ────────────────────────────────────────────
   const hasNoMovements = await frame.evaluate(() => {
     const text = (document.body?.innerText || "").toLowerCase();
-    return text.includes("no tienes movimientos") || text.includes("sin movimientos");
+    return (
+      text.includes("no tienes movimientos") || text.includes("sin movimientos")
+    );
   });
   if (hasNoMovements) {
     debugLog.push(`    ${tab} / ${billingType}: sin movimientos`);
@@ -271,10 +434,11 @@ async function extractTCMovements(
   }
 
   // ── FASE 3: Paginación robusta ───────────────────────────────────────────────
+  // La pestaña "Internacional USD" cobra en dólares; la "Nacional $" en pesos.
+  const currency: "CLP" | "USD" = tab.includes("USD") ? "USD" : "CLP";
   const allMovements: BankMovement[] = [];
 
   for (let pageIndex = 0; pageIndex < 50; pageIndex++) {
-
     // Estructura real de la tabla (5 columnas):
     //   td[0]  fecha
     //   td[1]  descripción + opcional .cont-circle
@@ -291,7 +455,9 @@ async function extractTCMovements(
         pendingConfirmation: boolean;
       }> = [];
 
-      const rows = document.querySelectorAll("table.custom-table tbody tr, .wrapper-table table tbody tr");
+      const rows = document.querySelectorAll(
+        "table.custom-table tbody tr, .wrapper-table table tbody tr",
+      );
 
       for (const row of rows) {
         const cells = row.querySelectorAll("td");
@@ -300,47 +466,53 @@ async function extractTCMovements(
         const date = cells[0]?.textContent?.trim() ?? "";
         if (!date || !/\d/.test(date)) continue;
 
-        const descP = cells[1]?.querySelector("p.customRow, p:first-child") as HTMLElement | null;
-        const description = descP?.textContent?.trim() ?? cells[1]?.textContent?.trim() ?? "";
+        const descP = cells[1]?.querySelector(
+          "p.customRow, p:first-child",
+        ) as HTMLElement | null;
+        const description =
+          descP?.textContent?.trim() ?? cells[1]?.textContent?.trim() ?? "";
 
         const pendingConfirmation = !!cells[1]?.querySelector(".cont-circle");
 
         const cardType = cells[2]?.textContent?.trim() ?? "";
 
         const montoCell = cells[3];
-        const montoP = montoCell?.querySelector(".container_monto p, p") as HTMLElement | null;
+        const montoP = montoCell?.querySelector(
+          ".container_monto p, p",
+        ) as HTMLElement | null;
         const rawAmount = montoP?.textContent?.trim() ?? "";
 
         const img = montoCell?.querySelector("img") as HTMLImageElement | null;
-        const isCargo = (img?.getAttribute("alt") ?? "").toLowerCase() === "cargo";
+        const isCargo =
+          (img?.getAttribute("alt") ?? "").toLowerCase() === "cargo";
 
         if (!rawAmount) continue;
 
-        results.push({ date, description, cardType, rawAmount, isCargo, pendingConfirmation });
+        results.push({
+          date,
+          description,
+          cardType,
+          rawAmount,
+          isCargo,
+          pendingConfirmation,
+        });
       }
       return results;
     });
 
-    debugLog.push(`    ${tab}/${billingType} página ${pageIndex + 1}: ${rawRows.length} filas`);
-    const distinctCardTypes = [...new Set(rawRows.map((r) => r.cardType).filter(Boolean))];
+    debugLog.push(
+      `    ${tab}/${billingType} página ${pageIndex + 1}: ${rawRows.length} filas`,
+    );
+    const distinctCardTypes = [
+      ...new Set(rawRows.map((r) => r.cardType).filter(Boolean)),
+    ];
     if (distinctCardTypes.length) {
-      debugLog.push(`    ${tab}/${billingType} columna tipo-tarjeta: ${JSON.stringify(distinctCardTypes)}`);
+      debugLog.push(
+        `    ${tab}/${billingType} columna tipo-tarjeta: ${JSON.stringify(distinctCardTypes)}`,
+      );
     }
 
-    for (const r of rawRows) {
-      const absAmount = parseChileanAmount(r.rawAmount);
-      if (absAmount === 0) continue;
-
-      allMovements.push({
-        date: normalizeDate(r.date),
-        description: r.description,
-        amount: r.isCargo ? -absAmount : absAmount,
-        balance: 0,
-        source,
-        card: r.cardType || undefined,
-        currency: tabCurrency(tab),
-      });
-    }
+    allMovements.push(...buildTcMovements(rawRows, source, currency));
 
     // Verificar si hay página siguiente
     const canAdvance = await frame.evaluate(() => {
@@ -375,7 +547,9 @@ async function extractTCMovements(
     if (!changed) break;
   }
 
-  debugLog.push(`    ${tab} / ${billingType}: ${allMovements.length} movimientos totales`);
+  debugLog.push(
+    `    ${tab} / ${billingType}: ${allMovements.length} movimientos totales`,
+  );
   return allMovements;
 }
 
@@ -387,10 +561,12 @@ async function waitForTableChange(
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const currentSignature = await frame.evaluate(() => {
-      const rows = document.querySelectorAll("table.custom-table tbody tr, .wrapper-table table tbody tr");
+      const rows = document.querySelectorAll(
+        "table.custom-table tbody tr, .wrapper-table table tbody tr",
+      );
       if (rows.length === 0) return "";
       const first = rows[0].querySelectorAll("td");
-      const last  = rows[rows.length - 1].querySelectorAll("td");
+      const last = rows[rows.length - 1].querySelectorAll("td");
       return (
         (first[0]?.textContent?.trim() ?? "") +
         (first[3]?.querySelector("p")?.textContent?.trim() ?? "") +
@@ -443,10 +619,15 @@ async function readCupoReading(frame: Frame): Promise<BciCupoReading> {
   return frame.evaluate(
     (natId: string, intId: string) => {
       const select =
-        (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
-        (Array.from(document.querySelectorAll("select")).find((s) =>
-          Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
-        ) ?? null);
+        (document.querySelector(
+          'select[name="tarjetasGeneral:select_cuenta"]',
+        ) as HTMLSelectElement | null) ??
+        Array.from(document.querySelectorAll("select")).find((s) =>
+          Array.from(s.options).some((o) =>
+            /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || ""),
+          ),
+        ) ??
+        null;
       const label =
         select?.options[select.selectedIndex]?.textContent?.trim() ||
         select?.options[0]?.textContent?.trim() ||
@@ -455,8 +636,9 @@ async function readCupoReading(frame: Frame): Promise<BciCupoReading> {
         const el = document.getElementById(id) as HTMLElement | null;
         return el?.innerText ?? "";
       };
-      const nationalText = panelText(natId) || (document.body?.innerText || "");
-      const internationalText = panelText(intId) || (document.body?.innerText || "");
+      const nationalText = panelText(natId) || document.body?.innerText || "";
+      const internationalText =
+        panelText(intId) || document.body?.innerText || "";
       return { label, nationalText, internationalText };
     },
     CUPO_NATIONAL_PANEL,
@@ -474,13 +656,25 @@ async function readCupoDropdown(
 ): Promise<{ options: CupoDropdownOption[]; selectedIndex: number }> {
   return frame.evaluate(() => {
     const select =
-      (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
-      (Array.from(document.querySelectorAll("select")).find((s) =>
-        Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
-      ) ?? null);
-    if (!select) return { options: [] as Array<{ value: string; label: string }>, selectedIndex: -1 };
+      (document.querySelector(
+        'select[name="tarjetasGeneral:select_cuenta"]',
+      ) as HTMLSelectElement | null) ??
+      Array.from(document.querySelectorAll("select")).find((s) =>
+        Array.from(s.options).some((o) =>
+          /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || ""),
+        ),
+      ) ??
+      null;
+    if (!select)
+      return {
+        options: [] as Array<{ value: string; label: string }>,
+        selectedIndex: -1,
+      };
     return {
-      options: Array.from(select.options).map((o) => ({ value: o.value, label: o.textContent?.trim() || "" })),
+      options: Array.from(select.options).map((o) => ({
+        value: o.value,
+        label: o.textContent?.trim() || "",
+      })),
       selectedIndex: select.selectedIndex,
     };
   });
@@ -495,10 +689,15 @@ async function readCupoDropdown(
 async function selectCupoCard(frame: Frame, value: string): Promise<void> {
   await frame.evaluate((target: string) => {
     const select =
-      (document.querySelector('select[name="tarjetasGeneral:select_cuenta"]') as HTMLSelectElement | null) ??
-      (Array.from(document.querySelectorAll("select")).find((s) =>
-        Array.from(s.options).some((o) => /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || "")),
-      ) ?? null);
+      (document.querySelector(
+        'select[name="tarjetasGeneral:select_cuenta"]',
+      ) as HTMLSelectElement | null) ??
+      Array.from(document.querySelectorAll("select")).find((s) =>
+        Array.from(s.options).some((o) =>
+          /bciplus|visa|mastercard|\d{4}/i.test(o.textContent || ""),
+        ),
+      ) ??
+      null;
     if (!select) return;
     select.value = target;
     select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -559,7 +758,10 @@ function parseClp(text: string): number {
  * Fixes the prior bug where `US$363,68` was read as `36368` instead of `363.68`.
  */
 function parseUsd(text: string): number {
-  const cleaned = text.replace(/[^\d.,]/g, "").replace(/\./g, "").replace(/,/g, ".");
+  const cleaned = text
+    .replace(/[^\d.,]/g, "")
+    .replace(/\./g, "")
+    .replace(/,/g, ".");
   return parseFloat(cleaned) || 0;
 }
 
@@ -569,7 +771,9 @@ function parseUsd(text: string): number {
  * sub-limit, which appears later in the same panel.
  */
 function firstCupoField(text: string, keyword: string): string | undefined {
-  const match = text.match(new RegExp(`${keyword}[^\\d$]*\\$?\\s*([\\d.,]+)`, "i"));
+  const match = text.match(
+    new RegExp(`${keyword}[^\\d$]*\\$?\\s*([\\d.,]+)`, "i"),
+  );
   return match?.[1];
 }
 
@@ -603,8 +807,12 @@ export function planCupoReads(
   selectedIndex: number,
 ): CupoReadStep[] {
   if (options.length === 0) return [];
-  const defaultIndex = selectedIndex >= 0 && selectedIndex < options.length ? selectedIndex : 0;
-  const ordered = [options[defaultIndex], ...options.filter((_, i) => i !== defaultIndex)];
+  const defaultIndex =
+    selectedIndex >= 0 && selectedIndex < options.length ? selectedIndex : 0;
+  const ordered = [
+    options[defaultIndex],
+    ...options.filter((_, i) => i !== defaultIndex),
+  ];
   return ordered.map((opt, i) => ({ ...opt, needsSwitch: i > 0 }));
 }
 
@@ -653,8 +861,9 @@ export function assignBciCupos(
   return creditCards.map((card) => {
     const last4 = cardLast4(card.label);
     const reading =
-      (last4 ? readings.find((r) => cardLast4(r.label) === last4) : undefined) ??
-      readings.find((r) => r.label === card.label);
+      (last4
+        ? readings.find((r) => cardLast4(r.label) === last4)
+        : undefined) ?? readings.find((r) => r.label === card.label);
     if (!reading) return { ...card };
 
     const result: CreditCardBalance = { ...card };
@@ -663,7 +872,8 @@ export function assignBciCupos(
     if (national) result.national = national;
 
     const international = parseCupoPanel(reading.internationalText, parseUsd);
-    if (international) result.international = { ...international, currency: "USD" };
+    if (international)
+      result.international = { ...international, currency: "USD" };
 
     return result;
   });
@@ -673,17 +883,26 @@ export function assembleBciResult(
   balance: number | undefined,
   accountMovements: BankMovement[],
   creditCards: CreditCardBalance[],
-): { accounts: AccountBalance[]; creditCards: CreditCardBalance[] | undefined } {
+): {
+  accounts: AccountBalance[];
+  creditCards: CreditCardBalance[] | undefined;
+} {
   const accounts: AccountBalance[] = [
     { balance, movements: deduplicateMovements(accountMovements) },
   ];
-  const cards = creditCards.map((c) => ({ ...c, movements: deduplicateMovements(c.movements ?? []) }));
+  const cards = creditCards.map((c) => ({
+    ...c,
+    movements: deduplicateMovements(c.movements ?? []),
+  }));
   return { accounts, creditCards: cards.length > 0 ? cards : undefined };
 }
 
 // ─── Main scrape function ────────────────────────────────────────
 
-async function scrapeBci(session: BrowserSession, options: ScraperOptions): Promise<ScrapeResult> {
+async function scrapeBci(
+  session: BrowserSession,
+  options: ScraperOptions,
+): Promise<ScrapeResult> {
   const { rut, password, saveScreenshots: doScreenshots } = options;
   const { page, debugLog, screenshot: doSave } = session;
   const { onProgress } = options;
@@ -698,7 +917,14 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
   progress("Abriendo sitio del banco...");
   const loginResult = await bciLogin(page, rut, password, debugLog, doSave);
   if (!loginResult.success) {
-    return { success: false, bank, accounts: [], error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n") };
+    return {
+      success: false,
+      bank,
+      accounts: [],
+      error: loginResult.error,
+      screenshot: loginResult.screenshot,
+      debug: debugLog.join("\n"),
+    };
   }
 
   progress("Sesión iniciada correctamente");
@@ -719,7 +945,9 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
       // Try API interception first
       const captured = await interceptor.waitFor("bci-checking", 10_000);
       if (captured.length > 0) {
-        debugLog.push(`  Checking API: ${captured.length} response(s) captured`);
+        debugLog.push(
+          `  Checking API: ${captured.length} response(s) captured`,
+        );
         const apiMovements = normalizeBciApiMovements(captured);
         debugLog.push(`  Checking API movements: ${apiMovements.length}`);
         if (apiMovements.length > 0) {
@@ -728,7 +956,9 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
           balance = await movFrame.evaluate(() => {
             const el = document.querySelector("#saldoDis + div, .bci-h2-w800");
             if (!el) return undefined;
-            const match = (el as HTMLElement).textContent?.trim().match(/\$\s*([\d.]+)/);
+            const match = (el as HTMLElement).textContent
+              ?.trim()
+              .match(/\$\s*([\d.]+)/);
             if (match) return parseInt(match[1].replace(/\./g, ""), 10);
             return undefined;
           });
@@ -736,35 +966,58 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
       }
 
       if (accountMovements.length === 0) {
-        debugLog.push("  Checking API: no data, falling back to HTML extraction");
+        debugLog.push(
+          "  Checking API: no data, falling back to HTML extraction",
+        );
         const accounts = await movFrame.evaluate((sel: string) => {
-          const select = document.querySelector(sel) as HTMLSelectElement | null;
+          const select = document.querySelector(
+            sel,
+          ) as HTMLSelectElement | null;
           if (!select) return [];
-          return Array.from(select.options).map((o) => ({ value: o.value, label: o.textContent?.trim() || "" }));
+          return Array.from(select.options).map((o) => ({
+            value: o.value,
+            label: o.textContent?.trim() || "",
+          }));
         }, ACCOUNT_SELECT);
         debugLog.push(`  Found ${accounts.length} account(s)`);
 
         for (let i = 0; i < accounts.length; i++) {
           if (i > 0) {
-            await movFrame.evaluate((value: string, sel: string) => {
-              const select = document.querySelector(sel) as HTMLSelectElement | null;
-              if (!select) return;
-              select.value = value;
-              select.dispatchEvent(new Event("change", { bubbles: true }));
-            }, accounts[i].value, ACCOUNT_SELECT);
+            await movFrame.evaluate(
+              (value: string, sel: string) => {
+                const select = document.querySelector(
+                  sel,
+                ) as HTMLSelectElement | null;
+                if (!select) return;
+                select.value = value;
+                select.dispatchEvent(new Event("change", { bubbles: true }));
+              },
+              accounts[i].value,
+              ACCOUNT_SELECT,
+            );
             await delay(3000);
           }
           if (balance === undefined) {
             balance = await movFrame.evaluate(() => {
-              const el = document.querySelector("#saldoDis + div, .bci-h2-w800");
+              const el = document.querySelector(
+                "#saldoDis + div, .bci-h2-w800",
+              );
               if (!el) return undefined;
-              const match = (el as HTMLElement).textContent?.trim().match(/\$\s*([\d.]+)/);
+              const match = (el as HTMLElement).textContent
+                ?.trim()
+                .match(/\$\s*([\d.]+)/);
               if (match) return parseInt(match[1].replace(/\./g, ""), 10);
               return undefined;
             });
           }
           const movements = await extractMovementsFromFrame(movFrame, debugLog);
-          const prefixed = accounts.length > 1 ? movements.map(m => ({ ...m, description: `[${accounts[i].label}] ${m.description}`.trim() })) : movements;
+          const prefixed =
+            accounts.length > 1
+              ? movements.map((m) => ({
+                  ...m,
+                  description: `[${accounts[i].label}] ${m.description}`.trim(),
+                }))
+              : movements;
           accountMovements.push(...prefixed);
         }
       }
@@ -785,32 +1038,61 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
     const cardLabels = await page.evaluate(() => {
       const selects = document.querySelectorAll("select.tdc");
       if (selects.length === 0) return [];
-      return Array.from((selects[0] as HTMLSelectElement).options).map((o) => o.textContent?.trim() || "");
+      return Array.from((selects[0] as HTMLSelectElement).options).map(
+        (o) => o.textContent?.trim() || "",
+      );
     });
     // One entry per card up front, so a card still surfaces even when its
     // movement extraction yields nothing.
     for (const label of cardLabels) creditCards.push({ label, movements: [] });
 
-    if (cardLabels.length > 0 && await clickByTitle(page, "Mis movimientos")) {
-      const tcFrame = await waitForFrame(page, IFRAME_PATTERNS.tcMovements, 15000);
+    if (
+      cardLabels.length > 0 &&
+      (await clickByTitle(page, "Mis movimientos"))
+    ) {
+      const tcFrame = await waitForFrame(
+        page,
+        IFRAME_PATTERNS.tcMovements,
+        15000,
+      );
       if (tcFrame) {
         await delay(3000);
         const tcMovements: BankMovement[] = [];
         for (const { tab, billingType, source } of TC_COMBINATIONS) {
-          const movements = await extractTCMovements(tcFrame, tab, billingType, source, debugLog);
+          const movements = await extractTCMovements(
+            tcFrame,
+            tab,
+            billingType,
+            source,
+            debugLog,
+          );
           tcMovements.push(...movements);
         }
         creditCards = routeBciCardMovements(creditCards, tcMovements);
-        const routed = creditCards.reduce((s, c) => s + (c.movements?.length ?? 0), 0);
-        debugLog.push(`  TC: ${tcMovements.length} movements extracted, ${routed} routed to ${creditCards.length} card(s)`);
-        for (const c of creditCards) debugLog.push(`    Card "${c.label}": ${c.movements?.length ?? 0} movements`);
+        const routed = creditCards.reduce(
+          (s, c) => s + (c.movements?.length ?? 0),
+          0,
+        );
+        debugLog.push(
+          `  TC: ${tcMovements.length} movements extracted, ${routed} routed to ${creditCards.length} card(s)`,
+        );
+        for (const c of creditCards)
+          debugLog.push(
+            `    Card "${c.label}": ${c.movements?.length ?? 0} movements`,
+          );
         if (tcMovements.length > routed) {
-          debugLog.push(`  WARNING: ${tcMovements.length - routed} TC movement(s) matched no card (check tipo-tarjeta column values above)`);
+          debugLog.push(
+            `  WARNING: ${tcMovements.length - routed} TC movement(s) matched no card (check tipo-tarjeta column values above)`,
+          );
         }
       }
 
       if (await clickByTitle(page, "Cupo disponible")) {
-        const cupoFrame = await waitForFrame(page, IFRAME_PATTERNS.tcCupo, 15000);
+        const cupoFrame = await waitForFrame(
+          page,
+          IFRAME_PATTERNS.tcCupo,
+          15000,
+        );
         if (cupoFrame) {
           await delay(3000);
 
@@ -821,10 +1103,14 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
           if (plan.length === 0) {
             // No card dropdown — degrade to a single read of whatever is displayed.
             const reading = await readCupoReading(cupoFrame);
-            debugLog.push(`  Cupo: no dropdown, single read "${reading.label}"`);
+            debugLog.push(
+              `  Cupo: no dropdown, single read "${reading.label}"`,
+            );
             readings.push(reading);
           } else {
-            debugLog.push(`  Cupo: ${plan.length} card(s) in dropdown, reading default first`);
+            debugLog.push(
+              `  Cupo: ${plan.length} card(s) in dropdown, reading default first`,
+            );
             for (const step of plan) {
               if (step.needsSwitch) {
                 // Snapshot the national panel, switch the dropdown, then poll saldosNac
@@ -832,8 +1118,14 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
                 // interceptor cannot read the XML partial-response and is not used here.
                 const snapshot = await readCupoNationalText(cupoFrame);
                 await selectCupoCard(cupoFrame, step.value);
-                const changed = await waitForCupoPanelChange(cupoFrame, snapshot, 8000);
-                debugLog.push(`  Cupo: switched to "${step.label}" (panel ${changed ? "updated" : "timeout"})`);
+                const changed = await waitForCupoPanelChange(
+                  cupoFrame,
+                  snapshot,
+                  8000,
+                );
+                debugLog.push(
+                  `  Cupo: switched to "${step.label}" (panel ${changed ? "updated" : "timeout"})`,
+                );
               }
               readings.push(await readCupoReading(cupoFrame));
             }
@@ -845,14 +1137,34 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
     }
   }
 
-  const totalCardMovements = creditCards.reduce((s, c) => s + (c.movements?.length ?? 0), 0);
-  debugLog.push(`  Total: ${accountMovements.length} account + ${totalCardMovements} card movements`);
-  progress(`Listo — ${accountMovements.length + totalCardMovements} movimientos totales`);
+  const totalCardMovements = creditCards.reduce(
+    (s, c) => s + (c.movements?.length ?? 0),
+    0,
+  );
+  debugLog.push(
+    `  Total: ${accountMovements.length} account + ${totalCardMovements} card movements`,
+  );
+  progress(
+    `Listo — ${accountMovements.length + totalCardMovements} movimientos totales`,
+  );
   await doSave(page, "06-final");
-  const ss = doScreenshots ? (await page.screenshot({ encoding: "base64" })) as string : undefined;
+  const ss = doScreenshots
+    ? ((await page.screenshot({ encoding: "base64" })) as string)
+    : undefined;
 
-  const { accounts, creditCards: cards } = assembleBciResult(balance, accountMovements, creditCards);
-  return { success: true, bank, accounts, creditCards: cards, screenshot: ss, debug: debugLog.join("\n") };
+  const { accounts, creditCards: cards } = assembleBciResult(
+    balance,
+    accountMovements,
+    creditCards,
+  );
+  return {
+    success: true,
+    bank,
+    accounts,
+    creditCards: cards,
+    screenshot: ss,
+    debug: debugLog.join("\n"),
+  };
 }
 
 // ─── Export ──────────────────────────────────────────────────────

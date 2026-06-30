@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { MOVEMENT_SOURCE } from "../types.js";
 import {
   isSaldoInicial,
+  isInterestRateLine,
   normalizeSantanderCheckingApiMovements,
   normalizeSantanderUnbilledApiMovements,
   normalizeSantanderBilledApiMovements,
@@ -30,6 +31,29 @@ describe("isSaldoInicial", () => {
     expect(isSaldoInicial("Compra supermercado")).toBe(false);
     expect(isSaldoInicial("Pago tarjeta")).toBe(false);
     expect(isSaldoInicial("saldo disponible")).toBe(false);
+  });
+});
+
+// ─── isInterestRateLine ──────────────────────────────────────────
+
+describe("isInterestRateLine", () => {
+  it("matches the 'tasa int.' metadata sub-line of an installment purchase", () => {
+    expect(isInterestRateLine("Haulmer*vmv servici     tasa int.  0,00%")).toBe(true);
+    expect(isInterestRateLine("Lg electronics          tasa int.  0,00%")).toBe(true);
+  });
+
+  it("matches regardless of casing and spacing", () => {
+    expect(isInterestRateLine("TASA INT. 2,50%")).toBe(true);
+    expect(isInterestRateLine("tasa  int  1%")).toBe(true);
+  });
+
+  it("does not match the installment purchase line itself", () => {
+    expect(isInterestRateLine("Haulmer*vmv servici     san cc 02-03")).toBe(false);
+  });
+
+  it("does not match regular transactions", () => {
+    expect(isInterestRateLine("Compra supermercado")).toBe(false);
+    expect(isInterestRateLine("Tasajera restaurant")).toBe(false);
   });
 });
 
@@ -334,6 +358,19 @@ describe("normalizeSantanderBilledApiMovements", () => {
       { FechaTxs: "2026-01-01", NombreComercio: "Zero", MontoTxs: "0000000000", NumeroCuotas: "00", TotalCuotas: "00" },
     ]);
     expect(normalizeSantanderBilledApiMovements([capture])).toHaveLength(0);
+  });
+
+  it("does not emit a duplicate movement for the 'tasa int.' line of an installment purchase", () => {
+    // Each installment carries a purchase line plus an informational interest-rate
+    // line that repeats the full installment amount; only the purchase line counts.
+    const capture = makeCapture([
+      { FechaTxs: "2026-06-12", NombreComercio: "Haulmer*vmv servici     san cc 02-03", MontoTxs: "0000079667", NumeroCuotas: "02", TotalCuotas: "03" },
+      { FechaTxs: "2026-06-12", NombreComercio: "Haulmer*vmv servici     tasa int.  0,00%", MontoTxs: "0000079667", NumeroCuotas: "00", TotalCuotas: "00" },
+    ]);
+    const result = normalizeSantanderBilledApiMovements([capture]);
+    expect(result).toHaveLength(1);
+    expect(result[0].description).toContain("san cc 02-03");
+    expect(result[0].amount).toBe(-79667);
   });
 
   it("skips captures with missing nested path", () => {

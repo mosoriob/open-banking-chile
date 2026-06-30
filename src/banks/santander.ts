@@ -79,6 +79,15 @@ export function isSaldoInicial(description: string): boolean {
   return /saldo\s+inicial/i.test(description);
 }
 
+/**
+ * The "tasa int. X%" sub-line of an installment purchase is informational
+ * metadata (the annual interest rate), not a charge. Santander repeats the
+ * full installment amount on it, so importing it duplicates the expense.
+ */
+export function isInterestRateLine(description: string): boolean {
+  return /\btasa\s+int\b/i.test(description);
+}
+
 export function normalizeSantanderUnbilledApiMovements(captures: unknown[]): BankMovement[] {
   const movements: BankMovement[] = [];
   for (const capture of captures) {
@@ -92,6 +101,7 @@ export function normalizeSantanderUnbilledApiMovements(captures: unknown[]): Ban
       const amount = isDebit ? -raw : raw;
       const description = (m.Comercio?.trim() || m.Descripcion?.trim() || "").trim();
       if (isSaldoInicial(description)) continue;
+      if (isInterestRateLine(description)) continue;
       movements.push({
         date: normalizeDate(m.Fecha),
         description,
@@ -128,6 +138,7 @@ export function normalizeSantanderBilledApiMovements(captures: unknown[]): BankM
       const raw = parseInt(cleaned, 10);
       if (!raw || isNaN(raw)) continue;
       if (isSaldoInicial(m.NombreComercio)) continue;
+      if (isInterestRateLine(m.NombreComercio)) continue;
       const isPayment = m.NombreComercio.toLowerCase().includes("monto cancelado");
       const amount = isPayment ? raw : -raw;
       const totalCuotas = parseInt(m.TotalCuotas.replace(/^0+/, "") || "0", 10);

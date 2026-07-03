@@ -1,18 +1,12 @@
 import type { Page } from "puppeteer-core";
 import type { BankMovement } from "../types.js";
 import { MOVEMENT_SOURCE } from "../types.js";
-import { parseChileanAmount, normalizeDate, deduplicateMovements, delay } from "../utils.js";
+import { parseChileanAmount, normalizeDate, deduplicateMovements, dropDuplicateInterestLines, delay } from "../utils.js";
 
 type TcTab = "unbilled" | "billed";
 
 function isSaldoInicial(description: string): boolean {
   return /saldo\s+inicial/i.test(description);
-}
-
-// "tasa int. X%" is the informational interest-rate sub-line of an installment
-// purchase; it repeats the installment amount and must not become a charge.
-function isInterestRateLine(description: string): boolean {
-  return /\btasa\s+int\b/i.test(description);
 }
 
 function isCreditCardCredit(description: string): boolean {
@@ -119,8 +113,6 @@ export async function extractCreditCardMovements(
 
   const movements = raw
     .map((row) => {
-      // The "tasa int. X%" sub-line repeats the installment amount; skip it.
-      if (isInterestRateLine(row.description)) return null;
       const absAmount = Math.abs(parseChileanAmount(row.amount));
       if (absAmount === 0) return null;
 
@@ -143,5 +135,5 @@ export async function extractCreditCardMovements(
     })
     .filter(Boolean) as BankMovement[];
 
-  return deduplicateMovements(movements);
+  return deduplicateMovements(dropDuplicateInterestLines(movements));
 }

@@ -373,6 +373,17 @@ describe("normalizeSantanderBilledApiMovements", () => {
     expect(result[0].amount).toBe(-79667);
   });
 
+  it("conserves a 'tasa int.' line that has no matching purchase pair (real 0% installment)", () => {
+    // Real BCI/Santander row: a standalone 0% installment whose only record is the
+    // "tasa int." line. Blanket-filtering it would silently drop a real expense.
+    const capture = makeCapture([
+      { FechaTxs: "2026-01-17", NombreComercio: "Mp     *kitchen cen     tasa int.  0,00%", MontoTxs: "0000009165", NumeroCuotas: "00", TotalCuotas: "00" },
+    ]);
+    const result = normalizeSantanderBilledApiMovements([capture]);
+    expect(result).toHaveLength(1);
+    expect(result[0].amount).toBe(-9165);
+  });
+
   it("skips captures with missing nested path", () => {
     expect(normalizeSantanderBilledApiMovements([{}])).toEqual([]);
     expect(normalizeSantanderBilledApiMovements([{ DATA: {} }])).toEqual([]);

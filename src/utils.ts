@@ -226,6 +226,52 @@ export function deduplicateMovements(movements: BankMovement[]): BankMovement[] 
   });
 }
 
+// "tasa int. X%" is the informational interest-rate sub-line of an installment
+// purchase. Its `X%` value is irrelevant here — a line is a duplicate purely by
+// whether a matching purchase line exists, so this predicate is rate-agnostic.
+const INTEREST_RATE_LINE = /\btasa\s+int\b/i;
+
+/**
+ * The merchant portion of a description: everything before the "tasa int." suffix,
+ * with trailing whitespace removed. Used to pair an interest-rate sub-line with its
+ * purchase line. Example: "Haulmer*vmv servici     tasa int.  0,00%" → "Haulmer*vmv servici".
+ */
+function bareMerchant(description: string): string {
+  const match = INTEREST_RATE_LINE.exec(description);
+  const head = match ? description.slice(0, match.index) : description;
+  return head.trimEnd();
+}
+
+/**
+ * Santander/BCI repeat each installment purchase as two rows with the same date and
+ * amount: the real purchase ("...  san cc 02-03") and an informational interest-rate
+ * sub-line ("...  tasa int. 0,00%"). Importing both double-counts the expense.
+ *
+ * Drops a "tasa int." line ONLY when a verifiable purchase pair exists — same date,
+ * same absolute amount, and a non-interest description that starts with the interest
+ * line's merchant. Matching the purchase by prefix (rather than parsing its installment
+ * code) is code-agnostic: it handles san cc / san cf / las cc / las cf / mel cf / etc.
+ * If no pair exists the line is CONSERVED — a "tasa int." line with no matching purchase
+ * is the only record of that spend (real 0% installments do occur), so dropping it would
+ * silently lose real expenses.
+ */
+export function dropDuplicateInterestLines(movements: BankMovement[]): BankMovement[] {
+  return movements.filter((m) => {
+    if (!INTEREST_RATE_LINE.test(m.description)) return true;
+    const merchant = bareMerchant(m.description);
+    if (merchant === "") return true; // no merchant to match on → conserve, never blanket-match
+    const hasPurchasePair = movements.some(
+      (p) =>
+        p !== m &&
+        !INTEREST_RATE_LINE.test(p.description) &&
+        p.date === m.date &&
+        Math.abs(p.amount) === Math.abs(m.amount) &&
+        p.description.startsWith(merchant),
+    );
+    return !hasPurchasePair; // drop only verifiable duplicates
+  });
+}
+
 /**
  * Converts a DD-MM-YYYY date to a human-readable month+year label.
  * Example: "19-03-2026" → "Marzo 2026"

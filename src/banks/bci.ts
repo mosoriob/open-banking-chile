@@ -15,6 +15,7 @@ import {
   parseChileanAmount,
   normalizeDate,
   deduplicateMovements,
+  dropDuplicateInterestLines,
 } from "../utils.js";
 import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
@@ -1068,7 +1069,11 @@ async function scrapeBci(
           );
           tcMovements.push(...movements);
         }
-        creditCards = routeBciCardMovements(creditCards, tcMovements);
+        // BCI repeats each installment purchase as a "tasa int." sub-line with the
+        // same date+amount; drop those duplicates while conserving standalone 0%
+        // installments that have no matching purchase line.
+        const dedupedTcMovements = dropDuplicateInterestLines(tcMovements);
+        creditCards = routeBciCardMovements(creditCards, dedupedTcMovements);
         const routed = creditCards.reduce(
           (s, c) => s + (c.movements?.length ?? 0),
           0,
@@ -1080,9 +1085,9 @@ async function scrapeBci(
           debugLog.push(
             `    Card "${c.label}": ${c.movements?.length ?? 0} movements`,
           );
-        if (tcMovements.length > routed) {
+        if (dedupedTcMovements.length > routed) {
           debugLog.push(
-            `  WARNING: ${tcMovements.length - routed} TC movement(s) matched no card (check tipo-tarjeta column values above)`,
+            `  WARNING: ${dedupedTcMovements.length - routed} TC movement(s) matched no card (check tipo-tarjeta column values above)`,
           );
         }
       }

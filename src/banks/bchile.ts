@@ -213,11 +213,17 @@ function facturadoToMovement(tx: ApiTransaccionFacturada, source: MovementSource
   return { date: normalizeDate(tx.fechaTransaccionString), description: tx.descripcion.trim(), amount: tx.grupo === "pagos" ? Math.abs(tx.montoTransaccion) : -Math.abs(tx.montoTransaccion), balance: 0, source, card: cardMask, installments: normalizeInstallments(tx.cuotas) };
 }
 
-async function fetchAccountMovements(page: Page, products: ApiProduct[], fullName: string, rut: string, debugLog: string[]): Promise<{ movements: BankMovement[]; balance?: number }> {
+async function fetchAccountMovements(page: Page, products: ApiProduct[], fullName: string, rut: string, debugLog: string[]): Promise<{ movements: BankMovement[]; balance?: number; label?: string }> {
   const accounts = products.filter(p => p.tipo === "cuenta" || p.tipo === "cuentaCorrienteMonedaLocal");
   const seenNums = new Set<string>();
   const unique = accounts.filter(a => { if (seenNums.has(a.numero)) return false; seenNums.add(a.numero); return true; });
   if (unique.length === 0) return { movements: [] };
+
+  // Stable label so the account keeps a durable identity across syncs (the
+  // consumer matches accounts by label, not by the drift-prone display name).
+  // Prefer the CLP checking account — the one whose balance we surface below.
+  const primary = unique.find(a => a.codigoMoneda === "CLP") ?? unique[0];
+  const label = `${primary.descripcionLogo} ${primary.mascara}`.trim() || undefined;
 
   const baseUrl = page.url().split("#")[0];
   await page.goto(`${baseUrl}#/movimientos/cuenta/saldos-movimientos`, { waitUntil: "networkidle2", timeout: 30000 });
@@ -253,7 +259,7 @@ async function fetchAccountMovements(page: Page, products: ApiProduct[], fullNam
     } catch (err) { debugLog.push(`    → Error: ${err instanceof Error ? err.message : String(err)}`); }
   }
 
-  return { movements, balance };
+  return { movements, balance, label };
 }
 
 async function fetchCreditCardData(page: Page, fullName: string, debugLog: string[]): Promise<{ movements: BankMovement[]; creditCards: CreditCardBalance[] }> {
@@ -446,7 +452,7 @@ async function scrapeBchile(session: BrowserSession, options: ScraperOptions): P
   return {
     success: true,
     bank,
-    accounts: [{ balance, movements: deduplicateMovements(acctResult.movements) }],
+    accounts: [{ label: acctResult.label, balance, movements: deduplicateMovements(acctResult.movements) }],
     creditCards: tcResult.creditCards.length > 0 ? tcResult.creditCards : undefined,
     screenshot: ss,
     debug: debugLog.join("\n"),

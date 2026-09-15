@@ -16,7 +16,15 @@ if (!path) {
   process.exit(1);
 }
 
-const result = JSON.parse(readFileSync(path, "utf8"));
+// Una versión antigua del CLI dejaba el banner de dotenv antes del JSON.
+// Empieza a leer en la primera llave para aceptar esos archivos.
+const raw = readFileSync(path, "utf8");
+const start = raw.indexOf("{");
+if (start < 0) {
+  console.error(`${path} no tiene JSON.`);
+  process.exit(1);
+}
+const result = JSON.parse(raw.slice(start));
 
 if (!result.success) {
   console.error(`Error: ${result.error}`);

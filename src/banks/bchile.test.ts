@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { MOVEMENT_SOURCE } from "../types.js";
 import type { BankMovement } from "../types.js";
 import {
+  accountCurrency,
   buildBilledMovements,
   buildUnbilledMovements,
   dropRepeatedCardMovements,
@@ -228,5 +229,33 @@ describe("dropRepeatedCardMovements with two currencies", () => {
     const out = dropRepeatedCardMovements([payload("A", true, [usd]), payload("B", false, [clp])]);
 
     expect(out.map(c => c.movements.length)).toEqual([1, 1]);
+  });
+});
+
+describe("accountCurrency", () => {
+  it("reads a dollar account as USD", () => {
+    expect(accountCurrency("USD")).toBe("USD");
+    expect(accountCurrency(" usd ")).toBe("USD");
+  });
+
+  it("reads a peso account as CLP", () => {
+    expect(accountCurrency("CLP")).toBe("CLP");
+    expect(accountCurrency(undefined)).toBe("CLP");
+  });
+
+  it("warns about an unknown currency and falls back to CLP", () => {
+    const debugLog: string[] = [];
+
+    expect(accountCurrency("EUR", debugLog)).toBe("CLP");
+    expect(debugLog.join()).toContain("EUR");
+  });
+
+  it("stays quiet for CLP and USD", () => {
+    const debugLog: string[] = [];
+
+    accountCurrency("CLP", debugLog);
+    accountCurrency("USD", debugLog);
+
+    expect(debugLog).toEqual([]);
   });
 });

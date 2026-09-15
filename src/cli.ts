@@ -2,7 +2,9 @@
 import { config } from 'dotenv';
 import { banks, listBanks, getBank } from "./index.js";
 import { Spinner } from "./utils.js";
-config();
+// `quiet` mantiene el banner de dotenv fuera de stdout. El JSON del resultado
+// sale por stdout, así que un banner rompe `--pretty > archivo.json` y `| jq`.
+config({ quiet: true });
 
 async function main() {
   const args = process.argv.slice(2);

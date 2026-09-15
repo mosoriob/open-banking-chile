@@ -205,10 +205,6 @@ async function bchileLogin(
 
 // ─── Data extraction ─────────────────────────────────────────────
 
-function cartolaMovToMovement(mov: ApiCartolaMov): BankMovement {
-  return { date: normalizeDate(mov.fechaContable), description: mov.descripcion.trim(), amount: mov.tipo === "cargo" ? -Math.abs(mov.monto) : Math.abs(mov.monto), balance: mov.saldo, source: MOVEMENT_SOURCE.account };
-}
-
 /**
  * Banco de Chile factura la línea internacional de una tarjeta en dólares. El
  * monto solo no dice a qué línea pertenece, así que una compra de USD 69 llega
@@ -242,6 +238,27 @@ export function unbilledMovementCurrency(origenTransaccion?: string): MovementCu
 /** Agrega `currency` solo para un movimiento en dólares. CLP es el default. */
 function withCurrency(currency: MovementCurrency): { currency?: "USD" } {
   return currency === "USD" ? { currency } : {};
+}
+
+function cartolaMovToMovement(mov: ApiCartolaMov, currency: MovementCurrency): BankMovement {
+  return { date: normalizeDate(mov.fechaContable), description: mov.descripcion.trim(), amount: mov.tipo === "cargo" ? -Math.abs(mov.monto) : Math.abs(mov.monto), ...withCurrency(currency), balance: mov.saldo, source: MOVEMENT_SOURCE.account };
+}
+
+/**
+ * Moneda de una cuenta corriente, desde `codigoMoneda` del producto.
+ *
+ * El cliente puede tener una cuenta en pesos y una cuenta M/E en dólares. Los
+ * movimientos de las dos llegan a la misma lista, así que un cargo de USD 50
+ * pasa por un cargo de $50 CLP si pierde la moneda de su cuenta.
+ *
+ * Una moneda que no es CLP ni USD queda como CLP, porque `BankMovement` solo
+ * acepta esas dos. El log de debug avisa cuando aparece otra.
+ */
+export function accountCurrency(codigoMoneda: string | undefined, debugLog?: string[]): MovementCurrency {
+  const codigo = (codigoMoneda ?? "").trim().toUpperCase();
+  if (codigo === "USD") return "USD";
+  if (codigo !== "" && codigo !== "CLP") debugLog?.push(`    ⚠ moneda desconocida "${codigo}" — se trata como CLP`);
+  return "CLP";
 }
 
 function facturadoToMovement(tx: ApiTransaccionFacturada, source: MovementSource, currency: MovementCurrency, cardMask?: string): BankMovement {
@@ -300,7 +317,9 @@ async function fetchAccountMovements(page: Page, products: ApiProduct[], fullNam
   let balance: number | undefined;
 
   for (const acct of unique) {
-    debugLog.push(`  Fetching ${acct.descripcionLogo} ${acct.mascara}`);
+    debugLog.push(`  Fetching ${acct.descripcionLogo} ${acct.mascara} (${acct.codigoMoneda})`);
+    const currency = accountCurrency(acct.codigoMoneda, debugLog);
+    const before = movements.length;
     const cuentaSeleccionada = { nombreCliente: fullName, rutCliente: rut, numero: acct.numero, mascara: acct.mascara, selected: true, codigoProducto: acct.codigo, claseCuenta: acct.claseCuenta, moneda: acct.codigoMoneda };
 
     try {
@@ -308,7 +327,7 @@ async function fetchAccountMovements(page: Page, products: ApiProduct[], fullNam
       const cartola = await apiPost<ApiCartolaResponse>(page, "bff-pper-prd-cta-movimientos/movimientos/getCartola", { cuentaSeleccionada, cabecera: { statusGenerico: true, paginacionDesde: 1 } });
 
       if (cartola.movimientos) {
-        for (const mov of cartola.movimientos) movements.push(cartolaMovToMovement(mov));
+        for (const mov of cartola.movimientos) movements.push(cartolaMovToMovement(mov, currency));
         if (balance === undefined && acct.codigoMoneda === "CLP" && cartola.movimientos.length > 0) balance = cartola.movimientos[0].saldo;
 
         let hasMore = cartola.movimientos.length > 0 && (cartola.pagina?.[0]?.masPaginas ?? false);
@@ -317,13 +336,14 @@ async function fetchAccountMovements(page: Page, products: ApiProduct[], fullNam
           try {
             const next = await apiPost<ApiCartolaResponse>(page, "bff-pper-prd-cta-movimientos/movimientos/getCartola", { cuentaSeleccionada, cabecera: { statusGenerico: true, paginacionDesde: offset } });
             if (!next.movimientos?.length) break;
-            for (const mov of next.movimientos) movements.push(cartolaMovToMovement(mov));
+            for (const mov of next.movimientos) movements.push(cartolaMovToMovement(mov, currency));
             offset += next.movimientos.length;
             hasMore = next.pagina?.[0]?.masPaginas ?? false;
           } catch { hasMore = false; }
         }
       }
     } catch (err) { debugLog.push(`    → Error: ${err instanceof Error ? err.message : String(err)}`); }
+    debugLog.push(`    → ${movements.length - before} movimientos en ${currency}`);
   }
 
   return { movements, balance, label };

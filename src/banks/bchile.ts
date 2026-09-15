@@ -413,6 +413,11 @@ async function fetchCreditCardData(page: Page, fullName: string, debugLog: strin
       const nextDue = nf.fechaProximoVencimiento ?? nf.fechaVencimiento;
       if (nextDue) ccEntry.nextDueDate = normalizeDate(nextDue);
       const unbilledMovs = buildUnbilledMovements(nf.listaMovNoFactur ?? [], mascara);
+      // El banco no documenta el texto de `origenTransaccion`. El log muestra
+      // los valores distintos para confirmar qué texto marca la línea
+      // internacional. El campo no tiene datos personales.
+      const origenes = [...new Set((nf.listaMovNoFactur ?? []).map(m => m.origenTransaccion))];
+      debugLog.push(`    origenTransaccion: ${origenes.join(", ") || "(lista vacía)"}`);
       // periodExpenses: suma de cargos no facturados (montos negativos → gastos).
       // El campo es un monto en pesos, así que un cargo en dólares queda fuera
       // de la suma. Sumar USD y CLP juntos da un número sin significado.

@@ -143,6 +143,42 @@ async function waitForFrame(
   return null;
 }
 
+// ─── Device-of-trust interstitial ────────────────────────────────
+
+// After login BCI can show a "dispositivo de confianza" page. It has two
+// screens: "Omitir" / "Ir a registrar", then "Omitir por ahora" /
+// "Registrar dispositivo". The session stays there until the user answers.
+// We always skip the registration.
+const DEVICE_PAGE_MARKER = "dispositivo de confianza";
+const DEVICE_SKIP_PREFIX = "omitir";
+
+async function skipDeviceRegistration(
+  page: Page,
+  debugLog: string[],
+): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const clicked = await page.evaluate(
+      (marker: string, skipPrefix: string) => {
+        const body = document.body?.innerText?.toLowerCase() ?? "";
+        if (!body.includes(marker)) return false;
+        for (const el of document.querySelectorAll("button, a")) {
+          const label = (el as HTMLElement).innerText?.trim().toLowerCase();
+          if (!label || !label.startsWith(skipPrefix)) continue;
+          if ((el as HTMLButtonElement).disabled) continue;
+          (el as HTMLElement).click();
+          return true;
+        }
+        return false;
+      },
+      DEVICE_PAGE_MARKER,
+      DEVICE_SKIP_PREFIX,
+    );
+    if (!clicked) return;
+    debugLog.push("  Skipped the device-of-trust page.");
+    await delay(3000);
+  }
+}
+
 async function bciLogin(
   page: Page,
   rut: string,
@@ -228,6 +264,9 @@ async function bciLogin(
   }
   await delay(3000);
   await doSave(page, "03-post-login");
+
+  await skipDeviceRegistration(page, debugLog);
+  await doSave(page, "03a-post-device-page");
 
   // 2FA
   if (await detect2FA(page, TWO_FACTOR_CONFIG)) {

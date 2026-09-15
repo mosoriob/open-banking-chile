@@ -262,18 +262,64 @@ async function fetchAccountMovements(page: Page, products: ApiProduct[], fullNam
   return { movements, balance, label };
 }
 
+/** Una tarjeta y la lista de movimientos que el banco entregó para ella. */
+export interface BchileCardPayload {
+  label: string;
+  titular: boolean;
+  movements: BankMovement[];
+}
+
+function fingerprintMovements(movements: BankMovement[]): string {
+  return movements
+    .map(m => `${m.date}|${m.description}|${m.amount}|${m.source}|${m.installments ?? ""}`)
+    .sort()
+    .join("\n");
+}
+
+/**
+ * Banco de Chile factura todas las tarjetas de una línea de crédito compartida
+ * en una sola cuenta. Los endpoints de movimientos responden con la lista de esa
+ * cuenta para cada tarjeta. Dos tarjetas adicionales entregan las mismas
+ * transacciones, y el consumidor las guarda dos o tres veces.
+ *
+ * Esta función deja la lista en una sola tarjeta y la vacía en las demás
+ * tarjetas del mismo grupo. La tarjeta titular es la que conserva la lista. Una
+ * tarjeta sin movimientos nunca es un duplicado.
+ */
+export function dropRepeatedCardMovements(cards: BchileCardPayload[]): BchileCardPayload[] {
+  const groups = new Map<string, number[]>();
+  cards.forEach((card, index) => {
+    if (card.movements.length === 0) return;
+    const key = fingerprintMovements(card.movements);
+    const group = groups.get(key);
+    if (group) group.push(index);
+    else groups.set(key, [index]);
+  });
+
+  const keepers = new Set<number>();
+  for (const group of groups.values()) {
+    const titularIndex = group.find(i => cards[i].titular);
+    keepers.add(titularIndex ?? group[0]);
+  }
+
+  return cards.map((card, index) =>
+    card.movements.length === 0 || keepers.has(index) ? card : { ...card, movements: [] });
+}
+
 async function fetchCreditCardData(page: Page, fullName: string, debugLog: string[]): Promise<{ movements: BankMovement[]; creditCards: CreditCardBalance[] }> {
-  const movements: BankMovement[] = [];
+  const payloads: BchileCardPayload[] = [];
   const creditCards: CreditCardBalance[] = [];
 
   let cards: ApiCardInfo[];
-  try { cards = await apiPost<ApiCardInfo[]>(page, "tarjetas/widget/informacion-tarjetas", {}); } catch { return { movements, creditCards }; }
-  if (cards.length === 0) return { movements, creditCards };
+  try { cards = await apiPost<ApiCardInfo[]>(page, "tarjetas/widget/informacion-tarjetas", {}); } catch { return { movements: [], creditCards }; }
+  if (cards.length === 0) return { movements: [], creditCards };
 
   debugLog.push(`  Found ${cards.length} credit card(s)`);
 
   for (const card of cards) {
+    const cardMovements: BankMovement[] = [];
     const cardLabel = `${card.marca} ${card.tipo} ${card.numero.slice(-8)}`.trim();
+    debugLog.push(`  Card ${cardLabel} — idProducto=${card.idProducto} titular=${card.titular}`);
     const mascara = card.numero.replace(/\*/g, "").length <= 4 ? `****${card.numero.slice(-4)}` : card.numero;
     const baseBody = { idTarjeta: card.idProducto, codigoProducto: "TNM", tipoTarjeta: `${card.marca} ${card.tipo}`.trim(), mascara, nombreTitular: fullName };
     const body = { ...baseBody, tipoCliente: "T" as const };
@@ -304,7 +350,7 @@ async function fetchCreditCardData(page: Page, fullName: string, debugLog: strin
       ccEntry.periodExpenses = periodExpensesRaw !== undefined
         ? periodExpensesRaw
         : unbilledMovs.filter(m => m.amount < 0).reduce((s, m) => s + Math.abs(m.amount), 0);
-      movements.push(...unbilledMovs);
+      cardMovements.push(...unbilledMovs);
     }
 
     // Facturados
@@ -332,7 +378,7 @@ async function fetchCreditCardData(page: Page, fullName: string, debugLog: strin
               // Skip section-subtotal rows (e.g. "TOTAL PAGOS A LA CUENTA").
               const desc = tx.descripcion.trim().toUpperCase();
               if (desc.startsWith("TOTAL ") && desc.endsWith("A LA CUENTA")) continue;
-              movements.push(facturadoToMovement(tx, MOVEMENT_SOURCE.credit_card_billed, mascara));
+              cardMovements.push(facturadoToMovement(tx, MOVEMENT_SOURCE.credit_card_billed, mascara));
             }
 
             // Override nextBillingDate/nextDueDate with accurate date-format values from resumen
@@ -359,9 +405,17 @@ async function fetchCreditCardData(page: Page, fullName: string, debugLog: strin
         }
       }
     } catch { /* ignore */ }
+
+    payloads.push({ label: cardLabel, titular: card.titular, movements: cardMovements });
   }
 
-  return { movements, creditCards };
+  const deduped = dropRepeatedCardMovements(payloads);
+  deduped.forEach((payload, index) => {
+    const dropped = payloads[index].movements.length - payload.movements.length;
+    if (dropped > 0) debugLog.push(`  ${payload.label}: ${dropped} movimientos repetidos de otra tarjeta — descartados`);
+  });
+
+  return { movements: deduped.flatMap(p => p.movements), creditCards };
 }
 
 // ─── Main scrape function ────────────────────────────────────────
@@ -434,11 +488,14 @@ async function scrapeBchile(session: BrowserSession, options: ScraperOptions): P
   debugLog.push(`  TC movements: ${tcResult.movements.length}`);
 
   // Distribute TC movements into each card's movements array
+  const singleCard = tcResult.creditCards.length === 1;
   for (const cc of tcResult.creditCards) {
     const mask = cc.label.match(/\*{4}\d{4}/)?.[0];
+    // Without a mask we can only claim the movements when there is one card.
+    // With several cards, an unmatched list would land on every one of them.
     const cardMovs = mask
       ? tcResult.movements.filter(m => m.card === mask)
-      : tcResult.movements;
+      : (singleCard ? tcResult.movements : []);
     cc.movements = deduplicateMovements(deduplicateAcrossSources(cardMovs));
   }
 

@@ -248,12 +248,12 @@ export function deduplicateAcrossSources(movements: BankMovement[]): BankMovemen
   const billedKeys = new Set<string>();
   for (const m of movements) {
     if (m.source === "credit_card_billed") {
-      billedKeys.add(`${m.date}|${m.description}|${m.amount}`);
+      billedKeys.add(`${m.date}|${m.description}|${m.amount}|${m.currency ?? ""}`);
     }
   }
   return movements.filter(m => {
     if (m.source !== "credit_card_unbilled") return true;
-    return !billedKeys.has(`${m.date}|${m.description}|${m.amount}`);
+    return !billedKeys.has(`${m.date}|${m.description}|${m.amount}|${m.currency ?? ""}`);
   });
 }
 

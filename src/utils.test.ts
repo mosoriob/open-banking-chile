@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { DebugLog, deduplicateMovements, normalizeDate } from "./utils.js";
+import {
+  DebugLog,
+  deduplicateMovements,
+  dropDuplicateInterestLines,
+  normalizeDate,
+} from "./utils.js";
 import { MOVEMENT_SOURCE } from "./types.js";
 import type { BankMovement } from "./types.js";
 
@@ -136,5 +141,127 @@ describe("deduplicateMovements", () => {
     const b = movement({ description: "B", balance: 200 });
     const result = deduplicateMovements([a, b, a]);
     expect(result.map((m) => m.description)).toEqual(["A", "B"]);
+  });
+});
+
+// ─── dropDuplicateInterestLines ──────────────────────────────────
+
+// A credit-card line (API-sourced: balance 0). Installment purchases arrive as
+// two rows with the same date+amount — the real purchase and a "tasa int." sub-line.
+function ccLine(date: string, description: string, amount: number): BankMovement {
+  return {
+    date,
+    description,
+    amount,
+    balance: 0,
+    source: MOVEMENT_SOURCE.credit_card_billed,
+  };
+}
+
+describe("dropDuplicateInterestLines", () => {
+  it("(a) drops a 0% 'tasa int.' line that has a matching purchase pair", () => {
+    const result = dropDuplicateInterestLines([
+      ccLine("12-06-2026", "Haulmer*vmv servici     san cc 02-03", -79667),
+      ccLine("12-06-2026", "Haulmer*vmv servici     tasa int.  0,00%", -79667),
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].description).toContain("san cc 02-03");
+  });
+
+  it("(b) drops a >0% 'tasa int.' line too — the rate value is irrelevant, only the pair matters", () => {
+    const result = dropDuplicateInterestLines([
+      ccLine("10-01-2026", "Tienda X              san cc 01-03", -50000),
+      ccLine("10-01-2026", "Tienda X              tasa int.  2,50%", -50000),
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].description).toContain("san cc 01-03");
+  });
+
+  it("(c) conserves a 'tasa int.' line with no purchase pair — it is the only record of that spend", () => {
+    // Real BCI rows (id 463/464): standalone 0% installments, no matching purchase.
+    const result = dropDuplicateInterestLines([
+      ccLine("17-01-2026", "Mp     *kitchen cen     tasa int.  0,00%", -9165),
+      ccLine("06-10-2025", "Mercado pago 4 tcom     tasa int.  0,00%", -13332),
+    ]);
+    expect(result).toHaveLength(2);
+  });
+
+  it("(d) conserves a 'tasa int.' line whose same date+amount sibling is a different merchant", () => {
+    const result = dropDuplicateInterestLines([
+      ccLine("30-03-2026", "Starbucks            san cc 01-03", -13165),
+      ccLine("30-03-2026", "Apple.com cl apple      tasa int.  2,50%", -13165),
+    ]);
+    expect(result).toHaveLength(2);
+  });
+
+  it("(e) is installment-code-agnostic — pairs across mel cf / las cf, not just san cc", () => {
+    const result = dropDuplicateInterestLines([
+      ccLine("24-03-2026", "Muni de melipilla m mel cf 03-03", -42327),
+      ccLine("24-03-2026", "Muni de melipilla m     tasa int.  0,00%", -42327),
+      ccLine("08-05-2026", "Mercadopago*grylan  las cf 02-03", -47997),
+      ccLine("08-05-2026", "Mercadopago*grylan      tasa int.  0,00%", -47997),
+    ]);
+    expect(result.map((m) => m.description)).toEqual([
+      "Muni de melipilla m mel cf 03-03",
+      "Mercadopago*grylan  las cf 02-03",
+    ]);
+  });
+
+  it("keeps a legitimate 'tasa'-but-not-'tasa int.' charge (stamp tax) even with a same date+amount pair", () => {
+    // The DL 3475 stamp tax contains "tasa" but not "tasa int." — it is a real charge.
+    const result = dropDuplicateInterestLines([
+      ccLine("19-06-2026", "Compra                san cc 01-03", -1621),
+      ccLine("19-06-2026", "Impuesto decreto ley 3475 tasa 0,066 %", -1621),
+    ]);
+    expect(result).toHaveLength(2);
+  });
+
+  it("does not blanket-match a bare 'tasa int.' line with no merchant prefix", () => {
+    // Guard: bareMerchant("tasa int. 0%") is empty; startsWith("") matches everything,
+    // so an unqualified interest line must be conserved, never paired to an arbitrary row.
+    const result = dropDuplicateInterestLines([
+      ccLine("01-01-2026", "Farmacia Ahumada", -5000),
+      ccLine("01-01-2026", "tasa int.  0,00%", -5000),
+    ]);
+    expect(result).toHaveLength(2);
+  });
+
+  it("(e/regression) reproduces the real BCI cartola verdict: 13 duplicates dropped, 2 standalones kept", () => {
+    // date, purchase description | amount — the 13 verifiable installment pairs.
+    const pairs: Array<[string, string, number]> = [
+      ["16-03-2026", "Decathlon           san cf 04-06", -34000],
+      ["24-03-2026", "Muni de melipilla m mel cf 03-03", -42327],
+      ["28-03-2026", "Municipalidad de pe san cf 03-03", -63656],
+      ["30-03-2026", "Apple.com cl apple  las cc 04-06", -69165],
+      ["30-03-2026", "Apple.com cl apple  las cc 04-06", -13165],
+      ["30-03-2026", "Apple.com cl apple  las cc 04-06", -10998],
+      ["08-05-2026", "Flow   *e-certchile san cf 02-03", -10309],
+      ["08-05-2026", "Mercadopago*grylan  las cf 02-03", -47997],
+      ["29-05-2026", "Dib                 san cc 02-06", -85179],
+      ["02-06-2026", "Lg electronics      san cc 02-06", -69330],
+      ["12-06-2026", "Haulmer*vmv servici san cc 02-03", -79667],
+      ["13-06-2026", "Haulmer*vmv servici san cc 02-03", -48720],
+      ["15-06-2026", "Haulmer*vmv servici san cc 02-03", -69307],
+    ];
+    const merchantOf = (purchaseDesc: string) => purchaseDesc.split(/\s{2,}/)[0];
+    const input: BankMovement[] = [];
+    for (const [date, purchase, amount] of pairs) {
+      input.push(ccLine(date, purchase, amount));
+      input.push(ccLine(date, `${merchantOf(purchase)}     tasa int.  0,00%`, amount));
+    }
+    // Two standalone interest lines with no purchase pair.
+    input.push(ccLine("17-01-2026", "Mp     *kitchen cen     tasa int.  0,00%", -9165));
+    input.push(ccLine("06-10-2025", "Mercado pago 4 tcom     tasa int.  0,00%", -13332));
+
+    const result = dropDuplicateInterestLines(input);
+
+    // 13 interest duplicates dropped; 13 purchases + 2 standalone interest lines survive.
+    expect(result).toHaveLength(15);
+    const interestSurvivors = result.filter((m) => /tasa\s+int/i.test(m.description));
+    expect(interestSurvivors).toHaveLength(2);
+    expect(interestSurvivors.map((m) => m.description).sort()).toEqual([
+      "Mercado pago 4 tcom     tasa int.  0,00%",
+      "Mp     *kitchen cen     tasa int.  0,00%",
+    ]);
   });
 });

@@ -28,15 +28,30 @@ describe("dropRepeatedCardMovements", () => {
     expect(out[1].movements[0].card).toBe("****1755");
   });
 
-  it("keeps the list on the first card when no card is titular", () => {
+  it("keeps the list on the same card whatever the order of the answer", () => {
     const cards = [
-      payload("Mastercard ****1111", false, [mov("COPEC APP", -4646, "****1111")]),
+      payload("Mastercard Black ****3082", true, [mov("MERPAGOMERCADOLIBRE", -129544, "****3082")]),
+      payload("Mastercard Black ****1755", true, [mov("MERPAGOMERCADOLIBRE", -129544, "****1755")]),
+      payload("Mastercard Black ****3058", true, [mov("MERPAGOMERCADOLIBRE", -129544, "****3058")]),
+    ];
+
+    const keeper = (order: BchileCardPayload[]) =>
+      dropRepeatedCardMovements(order).find(c => c.movements.length > 0)?.label;
+
+    expect(keeper(cards)).toBe("Mastercard Black ****1755");
+    expect(keeper([...cards].reverse())).toBe("Mastercard Black ****1755");
+    expect(keeper([cards[1], cards[2], cards[0]])).toBe("Mastercard Black ****1755");
+  });
+
+  it("keeps the list on the card with the lowest label when no card is titular", () => {
+    const cards = [
       payload("Mastercard ****2222", false, [mov("COPEC APP", -4646, "****2222")]),
+      payload("Mastercard ****1111", false, [mov("COPEC APP", -4646, "****1111")]),
     ];
 
     const out = dropRepeatedCardMovements(cards);
 
-    expect(out.map(c => c.movements.length)).toEqual([1, 0]);
+    expect(out.map(c => c.movements.length)).toEqual([0, 1]);
   });
 
   it("ignores the order of the movements inside each list", () => {

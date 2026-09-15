@@ -283,8 +283,12 @@ function fingerprintMovements(movements: BankMovement[]): string {
  * transacciones, y el consumidor las guarda dos o tres veces.
  *
  * Esta función deja la lista en una sola tarjeta y la vacía en las demás
- * tarjetas del mismo grupo. La tarjeta titular es la que conserva la lista. Una
- * tarjeta sin movimientos nunca es un duplicado.
+ * tarjetas del mismo grupo. La tarjeta que conserva la lista es la titular con
+ * la etiqueta menor. El banco entrega las tarjetas en un orden que no controla
+ * el consumidor, y `titular` es `true` en todas las tarjetas de una línea
+ * compartida. Por eso la etiqueta decide: así la misma tarjeta conserva la
+ * lista en cada sincronización, y el consumidor no mueve los movimientos de una
+ * cuenta a otra. Una tarjeta sin movimientos nunca es un duplicado.
  */
 export function dropRepeatedCardMovements(cards: BchileCardPayload[]): BchileCardPayload[] {
   const groups = new Map<string, number[]>();
@@ -298,8 +302,9 @@ export function dropRepeatedCardMovements(cards: BchileCardPayload[]): BchileCar
 
   const keepers = new Set<number>();
   for (const group of groups.values()) {
-    const titularIndex = group.find(i => cards[i].titular);
-    keepers.add(titularIndex ?? group[0]);
+    const titulares = group.filter(i => cards[i].titular);
+    const candidates = titulares.length > 0 ? titulares : group;
+    keepers.add(candidates.reduce((best, i) => cards[i].label < cards[best].label ? i : best));
   }
 
   return cards.map((card, index) =>

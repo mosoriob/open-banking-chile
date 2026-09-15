@@ -67,8 +67,27 @@ Agrega tu banco a la tabla de bancos soportados en el README.
 ### 5. Prueba
 
 ```bash
-npm run build
-MI_BANCO_RUT=xxx MI_BANCO_PASS=xxx node dist/cli.js --bank mi-banco --pretty
+./scripts/test-bank.sh mi-banco
+```
+
+El script compila, pide la clave sin mostrarla en pantalla y corre el scraper.
+La clave no queda en `.env`, ni en el historial del shell, ni en `ps`. El RUT
+sale de `MI_BANCO_RUT` en `.env`, o el script te lo pregunta.
+
+El resultado queda en `debug/mi-banco-result.json` con permiso 600. Ese archivo
+tiene tus movimientos reales: bórralo cuando termines.
+
+El script imprime un resumen — cuentas, tarjetas, monedas y el log de debug —
+en vez de volcar cada movimiento a la pantalla. Para ver el resumen otra vez:
+
+```bash
+node scripts/summarize-result.mjs debug/mi-banco-result.json
+```
+
+Acepta las opciones del CLI:
+
+```bash
+./scripts/test-bank.sh mi-banco --headful --screenshots
 ```
 
 ## Interfaz BankScraper

@@ -80,6 +80,8 @@ export interface CreditCardBalance {
     billingDate: string;
     /** Monto total facturado */
     billedAmount: number;
+    /** Moneda del estado de cuenta. Ausente = CLP. "USD" en el internacional. */
+    currency?: "CLP" | "USD";
     /** Fecha de vencimiento dd-mm-yyyy */
     dueDate: string;
     /** Pago mínimo */

@@ -1,8 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { MOVEMENT_SOURCE } from "../types.js";
 import type { BankMovement } from "../types.js";
-import { dropRepeatedCardMovements } from "./bchile.js";
-import type { BchileCardPayload } from "./bchile.js";
+import {
+  accountCurrency,
+  buildBilledMovements,
+  buildUnbilledMovements,
+  dropRepeatedCardMovements,
+  unbilledMovementCurrency,
+} from "./bchile.js";
+import type { ApiMovNoFactur, ApiResumenFacturado, ApiTransaccionFacturada, BchileCardPayload } from "./bchile.js";
 
 // ─── dropRepeatedCardMovements ───────────────────────────────────
 
@@ -107,5 +113,149 @@ describe("dropRepeatedCardMovements", () => {
     ];
 
     expect(dropRepeatedCardMovements(cards).map(c => c.movements.length)).toEqual([0, 1, 1, 0]);
+  });
+});
+
+// ─── currency of a credit-card movement ──────────────────────────
+
+function noFactur(over: Partial<ApiMovNoFactur> = {}): ApiMovNoFactur {
+  return {
+    origenTransaccion: "NACIONAL",
+    fechaTransaccionString: "22-08-2026",
+    montoCompra: 37970,
+    glosaTransaccion: "MERCADOPAGO *MERC**OL COMPRAS",
+    despliegueCuotas: "01/01",
+    ...over,
+  };
+}
+
+function facturada(over: Partial<ApiTransaccionFacturada> = {}): ApiTransaccionFacturada {
+  return {
+    fechaTransaccionString: "22-08-2026",
+    montoTransaccion: 69,
+    descripcion: "WM SUPERCENTER #571 COMPRAS INT.MA",
+    cuotas: "01/01",
+    grupo: "operaciones",
+    ...over,
+  };
+}
+
+function resumen(txs: ApiTransaccionFacturada[]): ApiResumenFacturado {
+  return { existeEstadoCuenta: true, seccionOperaciones: { transaccionesTarjetas: txs } };
+}
+
+describe("unbilledMovementCurrency", () => {
+  it("reads the international line as USD in every spelling", () => {
+    for (const origen of ["I", "i", "INT", "int", "INTERNACIONAL", " Internacional "]) {
+      expect(unbilledMovementCurrency(origen)).toBe("USD");
+    }
+  });
+
+  it("reads the national line as CLP", () => {
+    for (const origen of ["N", "NACIONAL", "Nacional", "", undefined]) {
+      expect(unbilledMovementCurrency(origen)).toBe("CLP");
+    }
+  });
+
+  it("reads an unknown value as CLP", () => {
+    expect(unbilledMovementCurrency("OTRO")).toBe("CLP");
+  });
+});
+
+describe("buildUnbilledMovements", () => {
+  it("marks an international purchase with the currency USD", () => {
+    const out = buildUnbilledMovements([noFactur({ origenTransaccion: "INTERNACIONAL", montoCompra: 69, glosaTransaccion: "WM SUPERCENTER #571 COMPRAS INT.MA" })], "****1755");
+
+    expect(out[0].currency).toBe("USD");
+    expect(out[0].amount).toBe(-69);
+    expect(out[0].card).toBe("****1755");
+  });
+
+  it("leaves a national purchase without a currency", () => {
+    const out = buildUnbilledMovements([noFactur()], "****1755");
+
+    expect(out[0].currency).toBeUndefined();
+    expect(out[0].amount).toBe(-37970);
+  });
+
+  it("keeps the two lines apart inside one list", () => {
+    const out = buildUnbilledMovements([
+      noFactur(),
+      noFactur({ origenTransaccion: "I", montoCompra: 2, glosaTransaccion: "CTLP*INREACH COMPRAS INT.MA" }),
+    ], "****1755");
+
+    expect(out.map(m => m.currency)).toEqual([undefined, "USD"]);
+  });
+});
+
+describe("buildBilledMovements", () => {
+  it("marks the international statement with the currency USD", () => {
+    const out = buildBilledMovements(resumen([facturada()]), "USD", "****1755");
+
+    expect(out[0].currency).toBe("USD");
+    expect(out[0].amount).toBe(-69);
+  });
+
+  it("leaves the national statement without a currency", () => {
+    const out = buildBilledMovements(resumen([facturada({ montoTransaccion: 37970 })]), "CLP", "****1755");
+
+    expect(out[0].currency).toBeUndefined();
+  });
+
+  it("drops the subtotal rows", () => {
+    const out = buildBilledMovements(resumen([
+      facturada({ descripcion: "TOTAL PAGOS A LA CUENTA" }),
+      facturada({ descripcion: "DELTA COMPRAS INT.MA" }),
+    ]), "USD");
+
+    expect(out.map(m => m.description)).toEqual(["DELTA COMPRAS INT.MA"]);
+  });
+
+  it("makes a payment positive and a purchase negative", () => {
+    const out = buildBilledMovements(resumen([
+      facturada({ grupo: "pagos", montoTransaccion: 500 }),
+      facturada({ grupo: "operaciones", montoTransaccion: 230 }),
+    ]), "USD");
+
+    expect(out.map(m => m.amount)).toEqual([500, -230]);
+  });
+});
+
+describe("dropRepeatedCardMovements with two currencies", () => {
+  it("keeps two lists that differ only in the currency", () => {
+    const usd: BankMovement = { ...mov("DELTA COMPRAS INT.MA", -230, "****1111"), currency: "USD" };
+    const clp: BankMovement = mov("DELTA COMPRAS INT.MA", -230, "****2222");
+
+    const out = dropRepeatedCardMovements([payload("A", true, [usd]), payload("B", false, [clp])]);
+
+    expect(out.map(c => c.movements.length)).toEqual([1, 1]);
+  });
+});
+
+describe("accountCurrency", () => {
+  it("reads a dollar account as USD", () => {
+    expect(accountCurrency("USD")).toBe("USD");
+    expect(accountCurrency(" usd ")).toBe("USD");
+  });
+
+  it("reads a peso account as CLP", () => {
+    expect(accountCurrency("CLP")).toBe("CLP");
+    expect(accountCurrency(undefined)).toBe("CLP");
+  });
+
+  it("warns about an unknown currency and falls back to CLP", () => {
+    const debugLog: string[] = [];
+
+    expect(accountCurrency("EUR", debugLog)).toBe("CLP");
+    expect(debugLog.join()).toContain("EUR");
+  });
+
+  it("stays quiet for CLP and USD", () => {
+    const debugLog: string[] = [];
+
+    accountCurrency("CLP", debugLog);
+    accountCurrency("USD", debugLog);
+
+    expect(debugLog).toEqual([]);
   });
 });
